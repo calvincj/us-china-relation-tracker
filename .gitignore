@@ -1,0 +1,31 @@
+# secrets
+.env
+
+# database
+tracker.db
+
+# output doc (generated — don't commit drafts)
+tracker_output.docx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claudecode/
+claude_cache/
+claudecode.json
+claude.log
+.claude/
+CLAUDE.md
+
+# editor
+.vscode/
+*.swp
