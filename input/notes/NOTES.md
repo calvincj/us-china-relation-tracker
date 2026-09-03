@@ -4355,3 +4355,74 @@ scripts, README wording) touch anything test_scraper.py/test_format_
 entry.py actually cover, so this confirms no regression rather than
 exercising the new behavior itself (which needed live testing instead,
 see above).
+
+2026-09-03: user spot-checked a real generated entry (Rubio/Brian
+Kilmeade interview, state.gov) and asked why it "included a bunch of
+paragraphs not mentioning China." Confirmed live: of the 34 Q&A
+exchanges in that transcript, only 1 actually mentioned China, yet all
+34 had been kept. Root cause: `filter_relevant_exchanges()` was written
+for the OPPOSITE direction — it checks whether a block mentions the US,
+which is the right filter for a Chinese-origin daily-briefing transcript
+(FMPRC/MOFCOM), where "does this exchange involve the US" is the
+meaningful question and "involves China" is trivially true throughout.
+This Rubio interview is US-origin content rerouted through
+`finalize_release_item()`'s Q&A-reroute path (a State Department
+interview transcript happens to be shaped like Q&A, same as a briefing),
+where the meaningful question flips: "does this block mention the US" is
+trivially true almost everywhere (a sitting Secretary of State is being
+interviewed), so nearly nothing got filtered out. This is the SAME
+directional-mismatch bug class as the `classify_relevance` "trivial
+China"/"trivial US" fixes earlier this week — a check built for one
+source direction, silently reused for the other without adjusting which
+country it looks for. Fixed by adding a `require_china_mention` param to
+`filter_relevant_exchanges()` (checks `_CHINA_MENTION_RE` instead of the
+US-mention regex) and a `chinese_origin` param to
+`finalize_release_item()`, threaded through from `process_release_common
+()`; `is_chinese_source = chinese_origin or raw_zh_text is not None`
+decides which direction to filter. Live-verified against the real entry:
+old code kept 34/34 exchanges, fixed code correctly narrows to 6 (the
+one real China-relevant block, about the Venezuela oil arrangement
+displacing Chinese/Russian/Iranian influence, plus its surrounding
+question/context lines). Checked every other stored entry with
+exchanges_json for the same class of bug (10 entries total) — every
+other one is FMPRC/MOFCOM (Chinese-origin, filtered in the correct
+direction already); this Rubio entry was the only US-origin Q&A-reroute
+case in the database, so no other entry needed correcting.
+
+While regenerating that entry's summary after narrowing its exchanges,
+hit a SECOND, unrelated real bug: `_hallucinated_officials()`'s own
+"Rubio" hallucination check falsely flagged the new (correct) summary,
+because the real transcript labels its speaker "SECRETARY RUBIO:" in all
+caps (a common transcript convention) and the check was case-sensitive
+(`"Rubio" in source_text`). This caused a needless regeneration retry
+that produced a WORSE, less specific summary ("The State Department
+addressed..." instead of naming Rubio) — the safety net actively hurt
+accuracy here. Fixed by lowercasing both sides of the comparison.
+Confirmed no other surname in `_HALLUCINATION_CHECK_SURNAMES` had the
+same live exposure, but the fix is general (applies to all of them).
+Added regression test `test_case_insensitive_match_against_an_
+all_caps_transcript_label`.
+
+Re-ran the summary regeneration for the Rubio entry with both fixes in
+place, and it introduced a THIRD, separate error, caught by manual
+review rather than by any automated check: the regenerated summary said
+"Senator Marco Rubio" instead of "Secretary of State Marco Rubio." This
+isn't a hallucinated NAME (so `_hallucinated_officials()`, which only
+checks surnames, correctly saw nothing wrong) — it's a hallucinated
+TITLE. Root cause: the work_text fed to the summarizer only ever labels
+him "SECRETARY RUBIO" as a bare speaker tag; it never spells out his
+full title or first name anywhere in the transcript text itself, so the
+model has to infer the title from outside knowledge, and this one run
+guessed his former Senate seat instead of his current Cabinet role.
+Re-running the same regeneration 2 more times produced 2 different,
+correct results ("Secretary Rubio" both times) — confirming this is a
+low-frequency, non-deterministic error rather than a consistent bug, and
+not worth a structural prompt change for one bare-label-title edge case.
+Rather than gamble on another random regeneration, corrected this one
+entry's summary directly and verified it against the actual source text
+before saving: "Secretary of State Marco Rubio said the arrangement
+giving the United States, not China, Russia, or Iran, a position in
+Venezuela's oil industry protects long-term U.S. energy security."
+Re-rendered `US-China Tracker Sep 1-3, 2026.docx` from the corrected
+database afterward so the saved file reflects all of the above. Ran the
+full test suite again after all three fixes: 112 tests, all green.

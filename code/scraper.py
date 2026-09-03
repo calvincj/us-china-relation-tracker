@@ -1337,10 +1337,20 @@ def _hallucinated_officials(summary: str, source_text: str) -> list[str]:
     announced this specific thing." That's fine: the one failure mode
     this exists to catch is a name in the summary that isn't in the
     source text AT ALL, which is unambiguous either way.
+
+    Case-INSENSITIVE on purpose — found live, 2026-09-03: a real State
+    Department interview transcript labels its speaker "SECRETARY
+    RUBIO:" (all caps, a common transcript convention), which a
+    case-sensitive `"Rubio" in source_text` check doesn't match at all —
+    this falsely flagged a real, correctly-named summary as a
+    hallucination and triggered a needless (and in that case actively
+    worse — the retry ended up LESS specific, "The State Department
+    addressed..." instead of naming Rubio) regeneration.
     """
+    source_lower = source_text.lower()
     return [
         name for name in _HALLUCINATION_CHECK_SURNAMES
-        if name in summary and name not in source_text
+        if name in summary and name.lower() not in source_lower
     ]
 
 
@@ -2545,7 +2555,7 @@ def _build_exchanges(paragraphs: list[str], spokespersons: set[str]) -> list[dic
     return exchanges
 
 
-def filter_relevant_exchanges(exchanges: list[dict]) -> list[dict]:
+def filter_relevant_exchanges(exchanges: list[dict], require_china_mention: bool = False) -> list[dict]:
     """
     Group exchanges into Q→A blocks, then keep only blocks where any
     exchange text has an explicit US mention (_EXPLICIT_US_MENTION_RE) —
@@ -2559,6 +2569,24 @@ def filter_relevant_exchanges(exchanges: list[dict]) -> list[dict]:
     only mentions China's position (or vice versa), both Q and A are included.
     A block is: one Q + all following A/CONT until the next Q.
     A-only blocks (no preceding Q) are treated as their own block.
+
+    `require_china_mention`: check for an explicit CHINA mention
+    (_CHINA_MENTION_RE) instead of a US mention — for Q&A content
+    rerouted from a US-origin source (finalize_release_item()'s reroute
+    path, e.g. a State Department interview transcript). "Does this
+    mention the US" is meaningless there: a US official being
+    interviewed mentions the US constantly regardless of topic, so EVERY
+    block passed that check. Found live, 2026-09-03: a real Rubio/Brian
+    Kilmeade interview about Iran/Cuba/Ukraine/Venezuela got included
+    almost entirely (33 of 34 exchanges) even though only ONE exchange
+    actually mentioned China — the default US-mention check is exactly
+    right for a Chinese-origin multi-topic press conference (FMPRC/
+    MOFCOM/MND, where the whole thing is trivially "about China" and the
+    real question is whether a given block ALSO touches the US), but is
+    the wrong direction entirely once this same function got reused for
+    English-origin Q&A rerouted here — same class of directional mismatch
+    already fixed once for classify_relevance()'s chinese_origin
+    parameter, just in this different function.
     """
     if not exchanges:
         return []
@@ -2580,10 +2608,11 @@ def filter_relevant_exchanges(exchanges: list[dict]) -> list[dict]:
     if current:
         blocks.append(current)
 
+    check_re = _CHINA_MENTION_RE if require_china_mention else _EXPLICIT_US_MENTION_RE
     result = []
     for block in blocks:
         combined = " ".join(ex.get("text", "") for ex in block)
-        if _EXPLICIT_US_MENTION_RE.search(combined):
+        if check_re.search(combined):
             result.extend(block)
 
     return result
@@ -3210,11 +3239,14 @@ def process_release_common(
     for state/whitehouse; a direct page fetch + extract_main_text()
     everywhere else).
 
-    `chinese_origin`: pass through to classify_relevance() — see its own
-    docstring. True for SCIO (a Chinese-government source, where "does
-    this involve China" is a meaningless question); leave False for every
-    US-origin caller (state/treasury/ustr/whitehouse), where it's exactly
-    the right one.
+    `chinese_origin`: pass through to classify_relevance() AND
+    finalize_release_item() — see their own docstrings. True for SCIO
+    (a Chinese-government source, where "does this involve China" is a
+    meaningless question for classify_relevance, and "does this Q&A
+    block mention the US" is the correct direction if it ever turns out
+    to be Q&A-shaped); leave False for every US-origin caller
+    (state/treasury/ustr/whitehouse), where both are exactly the right
+    direction already.
     """
     # Pass the FULL text, not a pre-truncated slice — found live (backtest.py,
     # 2026-08-05) that a real, already-covered Treasury sanctions release only
@@ -3231,7 +3263,8 @@ def process_release_common(
         mark_seen(conn, url)
         return False
 
-    queued = finalize_release_item(model, tag, url, date, plain, source_name, conn)
+    queued = finalize_release_item(model, tag, url, date, plain, source_name, conn,
+                                    chinese_origin=chinese_origin)
     if queued:
         log.info(f"[{tag}] Queued: {title}")
     return queued
@@ -3247,6 +3280,7 @@ def finalize_release_item(
     conn: sqlite3.Connection,
     spokespersons: set[str] | None = None,
     raw_zh_text: str | None = None,
+    chinese_origin: bool = False,
 ) -> bool:
     """Re-check whether this page is actually a genuine Q&A press
     conference before defaulting to release-style verbatim-paragraph
@@ -3259,7 +3293,20 @@ def finalize_release_item(
     paragraph name the US" keyword check — same one finalize_qa_item()'s
     own no-exchanges fallback already uses for fmprc/mofcom/mnd) instead
     of extract_key_paragraphs()'s LLM judgment call. Leave unset for
-    English-original sources."""
+    English-original sources.
+
+    `chinese_origin`: which direction the Q&A-reroute branch below should
+    filter in — see filter_relevant_exchanges()'s own `require_china_
+    mention` docstring for the real bug (a Rubio interview transcript
+    almost entirely included because "does this mention the US" is
+    trivially true throughout it) this exists to prevent. True for SCIO
+    (a Chinese-government source that can still occasionally turn out to
+    be Q&A-shaped); also treated as True whenever `raw_zh_text` is set
+    (MFA leadership), since that's Chinese-origin by definition even if
+    this particular call site didn't also set this flag explicitly.
+    Leave False for state/treasury/ustr/whitehouse.
+    """
+    is_chinese_source = chinese_origin or raw_zh_text is not None
     paragraphs = [p.strip() for p in plain.split("\n") if p.strip()]
     paragraphs = [_unbracket_label(p) for p in paragraphs]
     paragraphs = _merge_orphan_speaker_labels(paragraphs)
@@ -3267,7 +3314,7 @@ def finalize_release_item(
     if content_type_from_paragraphs(paragraphs) == "qa":
         log.info(f"[{tag}] Content looks like a genuine Q&A, not a plain release — rerouting: {url}")
         exchanges = parse_qa_from_plaintext("\n\n".join(paragraphs), spokespersons or set(), model)
-        exchanges = filter_relevant_exchanges(exchanges)
+        exchanges = filter_relevant_exchanges(exchanges, require_china_mention=not is_chinese_source)
         if not exchanges:
             log.info(f"[{tag}] No relevant exchanges after rerouting — skipping: {url}")
             mark_seen(conn, url)
