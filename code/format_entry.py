@@ -4,14 +4,16 @@ from __future__ import annotations
 Manual entry formatter for the US-China tracker Word doc.
 
 Paste or pipe a Q&A transcript or press release and get a properly
-formatted entry appended to tracker_output.docx — matching the
-exact style of the existing tracker docs.
+formatted entry appended to output/tracker_output.docx —
+matching the exact style of the existing tracker docs.
 
 Usage:
-    python format_entry.py                       # paste via stdin
-    python format_entry.py transcript.txt        # read from file
-    python format_entry.py clip.txt --out out.docx
-    python format_entry.py clip.txt --type qa    # override detection
+    python code/format_entry.py                       # paste via stdin
+    python code/format_entry.py transcript.txt        # read from file
+    python code/format_entry.py clip.txt --out out.docx
+    python code/format_entry.py clip.txt --type qa    # override detection
+
+(run these from the project root, not from inside code/)
 """
 
 import argparse

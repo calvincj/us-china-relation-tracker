@@ -1,11 +1,12 @@
 # secrets
 .env
 
-# database
-tracker.db
+# everything the pipeline generates at runtime: the dedup database, the
+# output doc, cost/review logs, the X account cache — see output/ in README.md
+output/
 
-# output doc (generated — don't commit drafts)
-tracker_output.docx
+# run_daily.sh logs
+logs/
 
 # Python
 __pycache__/
@@ -17,6 +18,9 @@ env/
 
 # macOS
 .DS_Store
+
+# Word lock/temp files (created automatically whenever a .docx is open)
+~$*.docx
 
 # Claude Code
 .claudecode/
