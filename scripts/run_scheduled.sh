@@ -17,18 +17,18 @@
 #      what happened without staring at a terminal.
 #
 # Usage:
-#   ./run_scheduled.sh            # run once, now — same as run_week.sh minus the progress bar
+#   ./scripts/run_scheduled.sh    # run once, now — same as run_week.sh minus the progress bar
 #
 # To actually make this run on its own every week, add a cron entry
 # (crontab -e):
-#   0 7 * * 1  cd "/path/to/us-china-relation-tracker" && ./run_scheduled.sh   # every Monday at 7am
+#   0 7 * * 1  cd "/path/to/us-china-relation-tracker" && ./scripts/run_scheduled.sh   # every Monday at 7am
 # or, on macOS, a launchd plist is more reliable than cron for laptops that
 # sleep overnight — see README.md for a StartCalendarInterval example. Once
 # either is set up, this genuinely runs unattended — nobody needs to
 # remember to type anything.
 
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 mkdir -p logs
 LOG_FILE="logs/$(date +%Y-%m-%d_%H%M%S).log"

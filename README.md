@@ -16,7 +16,7 @@ will automatically fill in the correct path for you. Press Enter.
 **Step 2.** Type this, then press Enter:
 
 ```
-pip install -r requirements.txt
+pip install -r scripts/requirements.txt
 ```
 
 **Step 3.** Make a copy of the file named `.env.example` in this folder,
@@ -170,22 +170,31 @@ A normal run takes about 10 to 15 minutes (measured across several real
 runs). It could take longer on a week with an unusual amount of news,
 since the AI service it uses only accepts requests at a limited rate.
 
+Everything in this folder is organized so the only things at the top
+level are the 3 double-click launchers, `README.md`, and `.env`/
+`.env.example`. Everything else lives in one of these subfolders:
+
 | File/folder | Purpose |
 |---|---|
+| `Run Weekly Tracker (Mac).app` | The Mac icon to double-click |
+| `Run Weekly Tracker (Mac).command` | What the `.app` runs underneath; works fine double-clicked directly too |
+| `Run Weekly Tracker (Windows).bat` | The Windows file to double-click; just launches the PowerShell script in `scripts/` |
 | `code/scraper.py` | Main program: one function per source it checks |
 | `code/backtest.py` | Checks the program's work against a real past tracker week (used for development, not normal use) |
 | `code/test_scraper.py` | Automated tests for the main program; run with `python code/test_scraper.py` |
 | `code/test_format_entry.py` | Automated tests for the manual add-an-entry tool; run with `python code/test_format_entry.py` |
 | `code/seed_dedup_db.py` | The one-time setup script from Step 5 above |
 | `code/format_entry.py` | The manual add-an-entry tool from above |
-| `Run Weekly Tracker (Mac).app` | The Mac icon to double-click |
-| `Run Weekly Tracker (Mac).command` | What the `.app` runs underneath; works fine double-clicked directly too |
-| `Run Weekly Tracker (Windows).bat` | The Windows file to double-click; just launches the PowerShell script below |
-| `run_weekly_tracker_windows.ps1` | The actual questions/date-validation logic for Windows (written in PowerShell, not batch, for reliable calendar-date checking) |
-| `run_week.sh` / `run_week.bat` | What the double-click launchers run underneath, for anyone who prefers typing the command directly in Terminal/Command Prompt |
-| `run_scheduled.sh` | For running this automatically on a schedule on a Mac, with no one watching (see comments inside the file) |
+| `scripts/requirements.txt` | The dependency list from Step 2 above |
+| `scripts/run_weekly_tracker_windows.ps1` | The actual questions/date-validation logic for Windows (written in PowerShell, not batch, for reliable calendar-date checking) |
+| `scripts/run_week.sh` / `scripts/run_week.bat` | What the double-click launchers run underneath, for anyone who prefers typing the command directly in Terminal/Command Prompt |
+| `scripts/run_scheduled.sh` | For running this automatically on a schedule on a Mac, with no one watching (see comments inside the file) |
 | `input/notes/SOURCES.md` | Full list of every source checked, and every source considered but not used, with reasons |
 | `input/notes/NOTES.md` | A running log of decisions and bugs found during development |
 | `input/notes/US_OFFICIALS_CHINESE_NAMES.md` | Reference list used so the tool translates Chinese names for US officials correctly |
+| `input/notes/sample_qa.txt` | Sample file for the "Adding an entry by hand" section above |
 | `input/past_trackers/` | The historical tracker documents, used to check the tool's work against known-correct entries |
-| `output/` | Everything the tool creates when it runs: the finished Word documents, its memory of what it's already covered, and its logs. Nothing in here is part of the program itself |
+| `output/` | Everything the tool creates when it runs: the finished Word documents and its memory of what it's already covered. Nothing in here is part of the program itself |
+| `logs/` | A timestamped log file from every run, in case something needs troubleshooting later |
+| `assets/` | The icon used by the Mac app |
+| `googledoc_autoformat_extension/` | The separate Google Docs version mentioned above |
