@@ -7,9 +7,9 @@ REM to read. This is the Windows counterpart to
 REM "Run Weekly Tracker (Mac).command" / "Run Weekly Tracker (Mac).app".
 REM
 REM The actual questions/date-validation logic lives in
-REM run_weekly_tracker_windows.ps1 (PowerShell, not batch) — see that
-REM file's own header comment for why. -ExecutionPolicy Bypass only
+REM scripts\run_weekly_tracker_windows.ps1 (PowerShell, not batch) — see
+REM that file's own header comment for why. -ExecutionPolicy Bypass only
 REM affects this one invocation, not any system-wide setting, so it
 REM doesn't need an administrator or any change to this computer's
 REM normal security settings.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run_weekly_tracker_windows.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\run_weekly_tracker_windows.ps1"

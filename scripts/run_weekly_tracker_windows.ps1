@@ -11,7 +11,10 @@
 # without a real Windows machine to test on directly.
 
 $ErrorActionPreference = "Stop"
-Set-Location -Path $PSScriptRoot
+# $PSScriptRoot is this file's own folder (scripts\); the actual project
+# files (code\, output\, etc.) are one level up, so run_week.bat needs to
+# be run from there, not from scripts\ itself.
+Set-Location -Path (Split-Path -Parent $PSScriptRoot)
 
 function Read-ValidDate {
     param(

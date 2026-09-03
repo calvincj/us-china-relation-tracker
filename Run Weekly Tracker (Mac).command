@@ -83,9 +83,9 @@ if [ "$choice" = "2" ]; then
         fi
     done
     echo ""
-    ./run_week.sh --start "$start_date" --end "$end_date"
+    ./scripts/run_week.sh --start "$start_date" --end "$end_date"
 else
-    ./run_week.sh
+    ./scripts/run_week.sh
 fi
 
 echo ""

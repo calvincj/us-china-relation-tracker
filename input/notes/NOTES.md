@@ -4426,3 +4426,58 @@ Venezuela's oil industry protects long-term U.S. energy security."
 Re-rendered `US-China Tracker Sep 1-3, 2026.docx` from the corrected
 database afterward so the saved file reflects all of the above. Ran the
 full test suite again after all three fixes: 112 tests, all green.
+
+2026-09-03 continued — folder reorganization, per direct user request
+("move everything into sub folders except for 1. the mac and window
+double clicks to run the script 2. .env file and example 3. anything
+that MUST be in there"). Moved `requirements.txt`, `run_week.sh`,
+`run_week.bat`, `run_scheduled.sh`, and `run_weekly_tracker_windows.ps1`
+into a new `scripts/` folder — these were the only remaining top-level
+files that a non-technical user never needs to open directly (they're
+either internal machinery the double-click launchers call, or a
+dependency list typed once during setup). Left everything else where a
+GitHub-hosted, non-technical-friendly project needs it: `README.md`,
+`.env`/`.env.example`, `.gitignore`, and the 3 double-click launchers
+(`Run Weekly Tracker (Mac).app`/`.command`, `Run Weekly Tracker
+(Windows).bat`) at the top level; `code/`, `input/`, `output/`, `logs/`,
+`assets/`, `googledoc_autoformat_extension/` were already their own
+subfolders and didn't need moving.
+
+Updated every path reference this touched, checked live rather than
+assumed: `Run Weekly Tracker (Mac).command` now calls
+`./scripts/run_week.sh`; `scripts/run_week.sh` and `scripts/
+run_scheduled.sh` now `cd` to their parent folder (`.../..`) instead of
+their own, since the project files they reference (`code/`, `output/`)
+are one level up from `scripts/` now; `scripts/run_week.bat` same fix
+(`cd /d "%~dp0.."`); `Run Weekly Tracker (Windows).bat` now points at
+`scripts\run_weekly_tracker_windows.ps1`; that .ps1's own `Set-Location`
+now resolves to the parent of `$PSScriptRoot` (its `& "$PSScriptRoot\
+run_week.bat"` calls needed no change, since $PSScriptRoot itself still
+correctly points at `scripts\` either way). README's Step 2 and its
+file-map table updated to the new paths, plus the file-map table gained
+rows for `logs/`, `assets/`, and `googledoc_autoformat_extension/` that
+it was missing before, and a stale claim that `output/` contains "its
+logs" was corrected — logs/ has always been its own top-level folder
+(confirmed live in `scraper.py` and `run_scheduled.sh`, both write to a
+bare `logs/` relative to the project root, never under `output/`).
+
+Checked the one file that hardcodes a launcher filename — the Mac
+`.app`'s compiled AppleScript (decompiled via `osadecompile` to check) —
+and confirmed it only references `Run Weekly Tracker (Mac).command`,
+which didn't move, so it needed no change.
+
+Verified live rather than assumed: ran `scripts/run_week.sh --help`
+from the project root and confirmed the relative-path chain up through
+`code/scraper.py` resolves correctly; manually traced the `cd`/dirname
+logic for both the Mac and Windows paths line by line. Could not
+actually execute the Windows batch/PowerShell files (no Windows machine
+available, same limitation as when they were first written) — the path
+logic was checked by careful reading, not live execution, and remains
+flagged as such. Also noticed and cleaned up `code/logs/` and
+`code/output/` — harmless stray directories created whenever a test run
+happens to launch with `code/` as its working directory (`scraper.py`
+creates `logs/`/`output/` relative to whatever the current directory is
+at import time); both are already covered by the existing `logs/`/
+`output/` .gitignore patterns either way, so this was tidiness, not a
+bug fix. Re-ran the full test suite after all of the above: 129 tests,
+all green.
