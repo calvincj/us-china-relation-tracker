@@ -7,8 +7,8 @@
 //   4. Save and reopen the doc — an "Auto-Format" menu will appear
 //
 // USAGE:
-//   1. Select text to format (or select nothing to format the whole doc)
-//   2. Auto-Format → Format Entry — done
+//   1. Select the raw text to format
+//   2. Auto-Format → ▶ Run — done
 
 var GEMINI_MODEL   = 'gemini-2.5-flash';
 var GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/' +
@@ -20,45 +20,39 @@ function onOpen() {
   DocumentApp.getUi()
     .createMenu('Auto-Format')
     .addItem('▶ Run', 'runFormatter')
+    .addItem('▶ Run with summary', 'runFormatterWithSummary')
     .addToUi();
 }
 
-// ── Menu action — runs entirely server-side, no sidebar ──────────────────────
+// ── Menu actions — run entirely server-side, no sidebar ──────────────────────
 
-function runFormatter() {
+function runFormatter() { runFormatter_(false); }
+function runFormatterWithSummary() { runFormatter_(true); }
+
+function runFormatter_(withSummary) {
   var ui   = DocumentApp.getUi();
   var doc  = DocumentApp.getActiveDocument();
   var body = doc.getBody();
   var rawText, indices;
 
   var selection = doc.getSelection();
-  if (selection) {
-    rawText = extractSelectionText_(selection);
-    if (!rawText.trim()) { ui.alert('Selected text is empty.'); return; }
-    indices = [];
-    selection.getRangeElements().forEach(function(rangeEl) {
-      try {
-        var el = rangeEl.getElement();
-        while (el.getParent() && el.getParent().getType() !== DocumentApp.ElementType.BODY_SECTION) {
-          el = el.getParent();
-        }
-        var idx = body.getChildIndex(el);
-        if (idx >= 0 && indices.indexOf(idx) === -1) indices.push(idx);
-      } catch (e) {}
-    });
-  } else {
-    var lines = [];
-    indices = [];
-    for (var i = 0; i < body.getNumChildren(); i++) {
-      try {
-        var text = body.getChild(i).asText().getText();
-        if (text.trim()) lines.push(text);
-      } catch (e) {}
-      indices.push(i);
-    }
-    rawText = lines.join('\n');
-    if (!rawText.trim()) { ui.alert('The document is empty.'); return; }
+  if (!selection) {
+    ui.alert('No text selected.\nHighlight the raw transcript or press release, then run again.');
+    return;
   }
+  rawText = extractSelectionText_(selection);
+  if (!rawText.trim()) { ui.alert('Selected text is empty.'); return; }
+  indices = [];
+  selection.getRangeElements().forEach(function(rangeEl) {
+    try {
+      var el = rangeEl.getElement();
+      while (el.getParent() && el.getParent().getType() !== DocumentApp.ElementType.BODY_SECTION) {
+        el = el.getParent();
+      }
+      var idx = body.getChildIndex(el);
+      if (idx >= 0 && indices.indexOf(idx) === -1) indices.push(idx);
+    } catch (e) {}
+  });
 
   // Idempotency: if any selected paragraph is already indented it's already formatted.
   for (var fi = 0; fi < indices.length; fi++) {
@@ -74,9 +68,8 @@ function runFormatter() {
 
   var paragraphs  = preprocessText_(rawText);
   var contentType = detectContentType_(paragraphs);
-  var date        = extractDate_(rawText);
-  var llm         = processWithLLM_(rawText, contentType, paragraphs);
-  var summary     = llm.summary || '';
+  var llm         = processWithLLM_(rawText, contentType, paragraphs, withSummary);
+  var summary     = withSummary ? (llm.summary || '') : null;
 
   // Insert in-place at the position of the first selected paragraph.
   var insertAt = indices.length > 0 ? Math.min.apply(null, indices) : body.getNumChildren();
@@ -90,29 +83,35 @@ function runFormatter() {
     var sections = splitExchangesBySpeaker_(exchanges);
     var totalQ = 0, totalA = 0;
     sections.forEach(function(section, si) {
-      // First section reuses the summary already generated; extra sections get their own.
-      var sectionSummary = (si === 0) ? summary : callLLM_(
-        'You are writing for the Brookings Institution US-China Relations Tracker.\n' +
-        'Write exactly ONE sentence summarizing this content.\n\n' +
-        SUMMARY_RULES_ +
-        '\nContent:\n' + section.map(function(ex) {
-          return (ex.speaker ? ex.speaker + ': ' : '') + ex.text;
-        }).join('\n').substring(0, 3000)
-      );
-      appendQAEntry_(body, counter, date, sectionSummary, section);
+      var sectionSummary = null;
+      if (withSummary) {
+        // First section reuses the summary already generated; extra sections get their own.
+        sectionSummary = (si === 0) ? summary : callLLM_(
+          'You are writing for the Brookings Institution US-China Relations Tracker.\n' +
+          'Write exactly ONE sentence summarizing this content.\n\n' +
+          SUMMARY_RULES_ +
+          '\nContent:\n' + section.map(function(ex) {
+            return (ex.speaker ? ex.speaker + ': ' : '') + ex.text;
+          }).join('\n').substring(0, 3000)
+        );
+      }
+      appendQAEntry_(body, counter, sectionSummary, section);
       totalQ += section.filter(function(e) { return e.type === 'Q'; }).length;
       totalA += section.filter(function(e) { return e.type === 'A'; }).length;
     });
 
-    var doneMsg = '✓ Done — ' + fmtDate_(date);
+    var doneMsg = '✓ Done';
     if (sections.length > 1) doneMsg += '  (' + sections.length + ' entries, ' + totalQ + ' Q, ' + totalA + ' A)';
     else doneMsg += '  (' + totalQ + ' Q, ' + totalA + ' A)';
-    doneMsg += '\n\n' + summary;
+    if (withSummary) doneMsg += '\n\n' + summary;
     ui.alert(doneMsg);
   } else {
     var paras = llm.paragraphs || [];
-    appendReleaseEntry_(body, counter, date, summary, paras);
-    ui.alert('✓ Done — ' + fmtDate_(date) + '\n\n' + summary + '\n\n(' + paras.length + ' paragraphs)');
+    appendReleaseEntry_(body, counter, summary, paras);
+    var doneMsg2 = '✓ Done\n\n';
+    if (withSummary) doneMsg2 += summary + '\n\n';
+    doneMsg2 += '(' + paras.length + ' paragraphs)';
+    ui.alert(doneMsg2);
   }
 
   // Originals shifted down by however many paragraphs we inserted.
@@ -221,28 +220,6 @@ function detectContentType_(paragraphs) {
   return hits >= 2 ? 'qa' : 'release';
 }
 
-function extractDate_(text) {
-  var m = text.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-  if (m) return new Date(m[1] + 'T12:00:00');
-
-  var MONTHS = {
-    January:0, February:1, March:2, April:3, May:4, June:5,
-    July:6, August:7, September:8, October:9, November:10, December:11,
-  };
-  m = text.match(
-    /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4})\b/
-  );
-  if (m) return new Date(parseInt(m[3]), MONTHS[m[1]], parseInt(m[2]));
-
-  return new Date();
-}
-
-function fmtDate_(date) {
-  var MONTHS = ['January','February','March','April','May','June',
-                'July','August','September','October','November','December'];
-  return MONTHS[date.getMonth()] + ' ' + date.getDate() + ', ' + date.getFullYear();
-}
-
 // ── Hardcoded speaker lookup (built from past tracker data) ──────────────────
 
 var KNOWN_Q_ = (function() {
@@ -286,10 +263,15 @@ var KNOWN_A_ = (function() {
     'elbridge colby','jacob helberg','kevin hassett','hassett',
     'peter navarro','navarro','stephen miller','adam smith',
     'ms. bruce','ms bruce',
-    // Chinese officials
-    'lin jian','mao ning','guo jiakun','he yongqian','he yadong',
-    'zhang xiaogang','jiang bin','wang yi','spokesperson mao ning',
-    'spokesperson lin jian',
+    // Chinese officials — MFA
+    'lin jian','mao ning','guo jiakun','he yongqian',
+    'spokesperson mao ning','spokesperson lin jian','spokesperson guo jiakun',
+    // Chinese officials — MOFCOM
+    'he yadong',
+    // Chinese officials — MND
+    'zhang xiaogang','jiang bin','wu qian',
+    // Chinese FM
+    'wang yi',
     // Generic
     'spokesperson','the spokesperson',
   ].forEach(function(k) { s[k] = true; });
@@ -302,6 +284,101 @@ var A_PREFIXES_ = [
   'under secretary ','deputy secretary ','ustr ',
   'national security advisor ','director ','representative ',
 ];
+
+// Full "Title Name" strings used to seed the summary prompt.
+// Keys are lowercase; values are the exact opening phrase for a summary sentence.
+var SPEAKER_TITLES_ = {
+  // ── Chinese MFA Spokespersons (active June 2026) ──────────────────────────
+  'lin jian':        'Foreign Ministry Spokesperson Lin Jian',
+  'mao ning':        'Foreign Ministry Spokesperson Mao Ning',
+  'guo jiakun':      'Foreign Ministry Spokesperson Guo Jiakun',
+  'he yongqian':     'Foreign Ministry Spokesperson He Yongqian',
+  'spokesperson lin jian':  'Foreign Ministry Spokesperson Lin Jian',
+  'spokesperson mao ning':  'Foreign Ministry Spokesperson Mao Ning',
+  'spokesperson guo jiakun':'Foreign Ministry Spokesperson Guo Jiakun',
+  // ── Chinese MOFCOM Spokespersons ──────────────────────────────────────────
+  'he yadong':       'MOFCOM Spokesperson He Yadong',
+  // ── Chinese MND (Ministry of National Defense) Spokespersons ─────────────
+  'zhang xiaogang':  'Ministry of National Defense Spokesperson Zhang Xiaogang',
+  'jiang bin':       'Ministry of National Defense Spokesperson Jiang Bin',
+  'wu qian':         'Ministry of National Defense Spokesperson Wu Qian',
+  // ── Chinese Foreign Minister ──────────────────────────────────────────────
+  'wang yi':         'Chinese Foreign Minister Wang Yi',
+  // ── U.S. President & Vice President ──────────────────────────────────────
+  'president trump':       'U.S. President Donald Trump',
+  'donald trump':          'U.S. President Donald Trump',
+  'trump':                 'U.S. President Donald Trump',
+  'the president':         'U.S. President Donald Trump',
+  'president donald trump':'U.S. President Donald Trump',
+  'jd vance':              'U.S. Vice President JD Vance',
+  'vance':                 'U.S. Vice President JD Vance',
+  'vice president vance':  'U.S. Vice President JD Vance',
+  // ── White House Press Secretary ───────────────────────────────────────────
+  'karoline leavitt': 'White House Press Secretary Karoline Leavitt',
+  'leavitt':          'White House Press Secretary Karoline Leavitt',
+  'ms. leavitt':      'White House Press Secretary Karoline Leavitt',
+  'ms leavitt':       'White House Press Secretary Karoline Leavitt',
+  // ── State Department ──────────────────────────────────────────────────────
+  'marco rubio':            'U.S. Secretary of State Marco Rubio',
+  'rubio':                  'U.S. Secretary of State Marco Rubio',
+  'secretary rubio':        'U.S. Secretary of State Marco Rubio',
+  'secretary of state rubio':'U.S. Secretary of State Marco Rubio',
+  // ── Treasury ─────────────────────────────────────────────────────────────
+  'scott bessent':           'U.S. Secretary of the Treasury Scott Bessent',
+  'bessent':                 'U.S. Secretary of the Treasury Scott Bessent',
+  'secretary bessent':       'U.S. Secretary of the Treasury Scott Bessent',
+  'treasury secretary bessent':'U.S. Secretary of the Treasury Scott Bessent',
+  // ── USTR ─────────────────────────────────────────────────────────────────
+  'jamieson greer':  'U.S. Trade Representative Jamieson Greer',
+  'ambassador greer':'U.S. Trade Representative Jamieson Greer',
+  'ustr greer':      'U.S. Trade Representative Jamieson Greer',
+  'u.s. trade representative greer':          'U.S. Trade Representative Jamieson Greer',
+  'u.s. trade representative jamieson greer': 'U.S. Trade Representative Jamieson Greer',
+  // ── Commerce ─────────────────────────────────────────────────────────────
+  'howard lutnick':   'U.S. Secretary of Commerce Howard Lutnick',
+  'lutnick':          'U.S. Secretary of Commerce Howard Lutnick',
+  'secretary lutnick':'U.S. Secretary of Commerce Howard Lutnick',
+  // ── Defense ──────────────────────────────────────────────────────────────
+  'pete hegseth':     'U.S. Secretary of Defense Pete Hegseth',
+  'hegseth':          'U.S. Secretary of Defense Pete Hegseth',
+  'secretary hegseth':'U.S. Secretary of Defense Pete Hegseth',
+  // ── Interior ─────────────────────────────────────────────────────────────
+  'doug burgum':      'U.S. Secretary of the Interior Doug Burgum',
+  'burgum':           'U.S. Secretary of the Interior Doug Burgum',
+  'secretary burgum': 'U.S. Secretary of the Interior Doug Burgum',
+  // ── Energy ───────────────────────────────────────────────────────────────
+  'chris wright':     'U.S. Secretary of Energy Chris Wright',
+  'secretary wright': 'U.S. Secretary of Energy Chris Wright',
+  // ── Other key officials ───────────────────────────────────────────────────
+  'kash patel':       'FBI Director Kash Patel',
+  'peter navarro':    'Senior Counselor to the President Peter Navarro',
+  'navarro':          'Senior Counselor to the President Peter Navarro',
+  'david perdue':     'U.S. Ambassador to China David Perdue',
+  'ambassador perdue':'U.S. Ambassador to China David Perdue',
+  'david purdue':     'U.S. Ambassador to China David Perdue',
+  'elbridge colby':   'Under Secretary of Defense for Policy Elbridge Colby',
+  'jacob helberg':    'Under Secretary of State for Economic Growth Jacob Helberg',
+  'kevin hassett':    'National Economic Council Director Kevin Hassett',
+  'hassett':          'National Economic Council Director Kevin Hassett',
+  'stephen miller':   'White House Deputy Chief of Staff Stephen Miller',
+  'adam smith':       'Representative Adam Smith',
+};
+
+// Returns the full "Title Name" for the dominant A speaker, or null if unknown.
+function getMainSpeakerTitle_(labels) {
+  var counts = {};
+  labels.forEach(function(l) {
+    if (l && l.type === 'A' && l.speaker) {
+      var key = l.speaker.toLowerCase().trim();
+      counts[key] = (counts[key] || 0) + 1;
+    }
+  });
+  var topKey = null, topCount = 0;
+  Object.keys(counts).forEach(function(k) {
+    if (counts[k] > topCount) { topCount = counts[k]; topKey = k; }
+  });
+  return topKey ? (SPEAKER_TITLES_[topKey] || null) : null;
+}
 
 function classifyBySpeaker_(name) {
   var lower = name.toLowerCase().trim();
@@ -339,13 +416,17 @@ function parseGeminiJson_(raw) {
 
 var SUMMARY_RULES_ =
   '- Start with the official\'s title + name (e.g. "Foreign Ministry Spokesperson Lin Jian")\n' +
-  '- Use active verbs: "addressed reporters\' questions on", "held a press briefing on",\n' +
-  '  "released a statement on", "issued a readout on"\n' +
-  '- Name the specific topic (tariffs, Taiwan, semiconductors, etc.)\n' +
+  '- Use a simple phrase like "held a press conference where he/she answered a question on",\n' +
+  '  "addressed reporters\' questions on", "held a press briefing on", "released a statement on"\n' +
+  '- Name ONE concrete, specific topic or event — not a broad category. Say what actually\n' +
+  '  happened (e.g. "China\'s recent missile test in the Pacific" or "the Solomon Islands\'\n' +
+  '  agreement for U.S. Coast Guard patrols"), not a vague subject label like "tariffs" or "defense"\n' +
+  '- Keep it short and concise: ONE sentence, ONE topic — do not stack multiple topics,\n' +
+  '  clauses, or extra background\n' +
   '- Do NOT start with "The"\n' +
   '- Output the sentence only — no JSON, no quotes, no extra text\n';
 
-function processWithLLM_(rawText, contentType, paragraphs) {
+function processWithLLM_(rawText, contentType, paragraphs, withSummary) {
 
   if (contentType === 'qa') {
     var labels = getHardcodedLabels_(paragraphs);
@@ -353,34 +434,54 @@ function processWithLLM_(rawText, contentType, paragraphs) {
     labels.forEach(function(l, i) { if (!l) unknownIdx.push(i); });
 
     if (unknownIdx.length === 0) {
+      if (!withSummary) return { exchanges: labels };
       // Every speaker recognized — only need a summary from Gemini
+      var titleHint0 = getMainSpeakerTitle_(labels);
+      var titleLine0 = titleHint0 ? '- The main official is: ' + titleHint0 + '\n' : '';
       var sum = callLLM_(
         'You are writing for the Brookings Institution US-China Relations Tracker.\n' +
         'Write exactly ONE sentence summarizing the content below.\n\n' +
-        SUMMARY_RULES_ + '\nContent:\n' + rawText.substring(0, 4000)
+        titleLine0 + SUMMARY_RULES_ + '\nContent:\n' + rawText.substring(0, 4000)
       );
       return { summary: sum, exchanges: labels };
     }
 
-    // Send Gemini only the unrecognized paragraphs + ask for summary
+    // Send Gemini only the unrecognized paragraphs
     var unknownParas  = unknownIdx.map(function(i) { return paragraphs[i]; });
     var numbered = unknownParas.map(function(p, j) {
       return '[' + (j + 1) + '] ' + p;
     }).join('\n');
 
-    var qaPrompt =
-      'You are working for the Brookings Institution US-China Relations Tracker.\n\n' +
-      'Do TWO things and return a single JSON object.\n\n' +
-      '1. SUMMARY — write exactly one sentence:\n' + SUMMARY_RULES_ + '\n' +
-      '2. CLASSIFY each numbered paragraph as Q, A, or CONT:\n' +
-      '   Q = journalist / media outlet asking a question\n' +
-      '   A = government official, spokesperson, or department responding\n' +
-      '   CONT = continuation of previous A, no new speaker label\n' +
-      '   "speaker" = name before the colon, or null for CONT.\n\n' +
-      'Return ONLY this JSON:\n' +
-      '{"summary":"...","exchanges":[{"type":"Q","speaker":"Reuters"},{"type":"A","speaker":"Lin Jian"}]}\n\n' +
-      'Full content (context):\n' + rawText.substring(0, 3000) +
-      '\n\nParagraphs to classify:\n' + numbered;
+    var qaPrompt;
+    if (withSummary) {
+      var titleHint1 = getMainSpeakerTitle_(labels);
+      var titleLine1 = titleHint1 ? '- The main official is: ' + titleHint1 + '\n' : '';
+      qaPrompt =
+        'You are working for the Brookings Institution US-China Relations Tracker.\n\n' +
+        'Do TWO things and return a single JSON object.\n\n' +
+        '1. SUMMARY — write exactly one sentence:\n' + titleLine1 + SUMMARY_RULES_ + '\n' +
+        '2. CLASSIFY each numbered paragraph as Q, A, or CONT:\n' +
+        '   Q = journalist / media outlet asking a question\n' +
+        '   A = government official, spokesperson, or department responding\n' +
+        '   CONT = continuation of previous A, no new speaker label\n' +
+        '   "speaker" = name before the colon, or null for CONT.\n\n' +
+        'Return ONLY this JSON:\n' +
+        '{"summary":"...","exchanges":[{"type":"Q","speaker":"Reuters"},{"type":"A","speaker":"Lin Jian"}]}\n\n' +
+        'Full content (context):\n' + rawText.substring(0, 3000) +
+        '\n\nParagraphs to classify:\n' + numbered;
+    } else {
+      qaPrompt =
+        'You are working for the Brookings Institution US-China Relations Tracker.\n\n' +
+        'CLASSIFY each numbered paragraph as Q, A, or CONT:\n' +
+        '   Q = journalist / media outlet asking a question\n' +
+        '   A = government official, spokesperson, or department responding\n' +
+        '   CONT = continuation of previous A, no new speaker label\n' +
+        '   "speaker" = name before the colon, or null for CONT.\n\n' +
+        'Return ONLY this JSON:\n' +
+        '{"exchanges":[{"type":"Q","speaker":"Reuters"},{"type":"A","speaker":"Lin Jian"}]}\n\n' +
+        'Full content (context):\n' + rawText.substring(0, 3000) +
+        '\n\nParagraphs to classify:\n' + numbered;
+    }
 
     var result = null;
     for (var attempt = 0; attempt < 2; attempt++) {
@@ -404,17 +505,29 @@ function processWithLLM_(rawText, contentType, paragraphs) {
     return { summary: result.summary || '', exchanges: labels };
   }
 
-  // release / press statement — always needs Gemini for both summary + paragraphs
-  var releasePrompt =
-    'You are working for the Brookings Institution US-China Relations Tracker.\n\n' +
-    'Do TWO things and return a single JSON object.\n\n' +
-    '1. SUMMARY — write exactly one sentence:\n' + SUMMARY_RULES_ + '\n' +
-    '2. PARAGRAPHS — extract the 5 most informative verbatim paragraphs about\n' +
-    '   US-China relations (trade, tariffs, technology, Taiwan, diplomacy).\n' +
-    '   Copy verbatim — no paraphrasing. Preserve any speaker labels.\n\n' +
-    'Return ONLY this JSON:\n' +
-    '{"summary":"...","paragraphs":["para1","para2","para3","para4","para5"]}\n\n' +
-    'Text:\n' + rawText.substring(0, 8000);
+  // release / press statement — needs Gemini to extract formatted paragraphs
+  var releasePrompt;
+  if (withSummary) {
+    releasePrompt =
+      'You are working for the Brookings Institution US-China Relations Tracker.\n\n' +
+      'Do TWO things and return a single JSON object.\n\n' +
+      '1. SUMMARY — write exactly one sentence:\n' + SUMMARY_RULES_ + '\n' +
+      '2. PARAGRAPHS — extract the 5 most informative verbatim paragraphs about\n' +
+      '   US-China relations (trade, tariffs, technology, Taiwan, diplomacy).\n' +
+      '   Copy verbatim — no paraphrasing. Preserve any speaker labels.\n\n' +
+      'Return ONLY this JSON:\n' +
+      '{"summary":"...","paragraphs":["para1","para2","para3","para4","para5"]}\n\n' +
+      'Text:\n' + rawText.substring(0, 8000);
+  } else {
+    releasePrompt =
+      'You are working for the Brookings Institution US-China Relations Tracker.\n\n' +
+      'Extract the 5 most informative verbatim paragraphs about\n' +
+      'US-China relations (trade, tariffs, technology, Taiwan, diplomacy).\n' +
+      'Copy verbatim — no paraphrasing. Preserve any speaker labels.\n\n' +
+      'Return ONLY this JSON:\n' +
+      '{"paragraphs":["para1","para2","para3","para4","para5"]}\n\n' +
+      'Text:\n' + rawText.substring(0, 8000);
+  }
 
   var res = null;
   for (var attempt2 = 0; attempt2 < 2; attempt2++) {
@@ -483,19 +596,15 @@ function buildExchanges_(paragraphs, labels) {
 function baseStyle_() {
   var A = DocumentApp.Attribute;
   var s = {};
-  s[A.FONT_FAMILY]   = 'Times New Roman';
-  s[A.FONT_SIZE]     = 12;
-  s[A.LINE_SPACING]  = 1.15;
-  s[A.SPACING_AFTER] = 8;
-  s[A.BOLD]          = false;
-  s[A.ITALIC]        = false;
+  s[A.FONT_FAMILY]      = 'Times New Roman';
+  s[A.FONT_SIZE]        = 12;
+  s[A.LINE_SPACING]     = 1.15;
+  s[A.SPACING_AFTER]    = 8;
+  s[A.BOLD]             = false;
+  s[A.ITALIC]           = false;
+  s[A.FOREGROUND_COLOR] = '#000000';
+  s[A.BACKGROUND_COLOR] = null;
   return s;
-}
-
-function appendDateHeading_(body, counter, dateStr) {
-  var para = body.insertParagraph(counter.idx++, dateStr);
-  para.setAttributes(baseStyle_());
-  para.editAsText().setBold(true);
 }
 
 function appendSummaryPara_(body, counter, text) {
@@ -515,6 +624,8 @@ function appendIndentedPara_(body, counter, parts) {
     t.setFontSize(12);
     t.setBold(!!part.bold);
     t.setItalic(!!part.italic);
+    t.setForegroundColor('#000000');
+    t.setBackgroundColor(null);
   });
 }
 
@@ -526,9 +637,8 @@ function appendSeparator_(body, counter) {
   body.insertParagraph(counter.idx++, '').setAttributes(style);
 }
 
-function appendQAEntry_(body, counter, date, summary, exchanges) {
-  appendDateHeading_(body, counter, fmtDate_(date));
-  appendSummaryPara_(body, counter, summary);
+function appendQAEntry_(body, counter, summary, exchanges) {
+  if (summary) appendSummaryPara_(body, counter, summary);
 
   exchanges.forEach(function(ex) {
     if (ex.type === 'Q') {
@@ -549,9 +659,8 @@ function appendQAEntry_(body, counter, date, summary, exchanges) {
   appendSeparator_(body, counter);
 }
 
-function appendReleaseEntry_(body, counter, date, summary, paragraphs) {
-  appendDateHeading_(body, counter, fmtDate_(date));
-  appendSummaryPara_(body, counter, summary);
+function appendReleaseEntry_(body, counter, summary, paragraphs) {
+  if (summary) appendSummaryPara_(body, counter, summary);
 
   var SPEAKER_RE = /^([A-Z][A-Za-z0-9 \-'\.]{1,50}):\s+(.+)$/s;
 
