@@ -54,6 +54,7 @@ from google import genai
 from google.genai import types
 from groq import Groq
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 from typing import Callable, Optional
 from pydantic import BaseModel
 
@@ -5169,68 +5170,82 @@ def main() -> None:
     total_new = 0
 
     sources_to_run = list(SOURCES.keys()) if run_all else [s]
-    pbar = tqdm(total=len(sources_to_run), desc="Starting...", unit="source")
-    source_failures: dict[str, list[str]] = {}
+    # logging_redirect_tqdm(): a plain logging.StreamHandler writes
+    # straight to the terminal with no idea a progress bar is live there
+    # — a WARNING/ERROR firing mid-run (a real one, e.g. "[mofcom] Failed
+    # to fetch list...") used to land in the middle of tqdm's own cursor-
+    # control sequences, corrupting the bar into multiple broken/
+    # duplicate-looking lines. This temporarily reroutes every logging
+    # handler's output through tqdm.write() instead, which knows to clear
+    # the bar, print the line cleanly, then redraw the bar — for the
+    # whole rest of this function, not just around one log call, since
+    # any source's fetch can log a warning/error at any moment. Confirmed
+    # this was the actual mechanism (not something more exotic) by
+    # reproducing the exact garbled-bar shape from a real MOFCOM SSL
+    # error live, 2026-09-03.
+    with logging_redirect_tqdm():
+        pbar = tqdm(total=len(sources_to_run), desc="Starting...", unit="source")
+        source_failures: dict[str, list[str]] = {}
 
-    def run(key: str, fn, *fn_args):
-        nonlocal total_new
-        if run_all or s == key:
-            pbar.set_description(SOURCES.get(key, key))
-            capture = _SourceErrorCapture()
-            log.addHandler(capture)
-            try:
-                fn(*fn_args)
-            except Exception as exc:
-                log.error(f"[{key}] Unhandled error: {exc}")
-            finally:
-                log.removeHandler(capture)
-            if capture.messages:
-                source_failures[key] = capture.messages
-            # Flush after each source rather than only once at the very end:
-            # bounds how much work is lost if the whole process gets killed
-            # mid-run, while still collapsing repeated date headings within
-            # (and, via the module-level "last date written", across)
-            # sources — see the PENDING_ENTRIES comment block above.
-            n = flush_pending_entries(doc, conn)
-            if n:
-                log.info(f"[{key}] Wrote {n} entries to {DOC_PATH}")
-                total_new += n
-            pbar.update(1)
+        def run(key: str, fn, *fn_args):
+            nonlocal total_new
+            if run_all or s == key:
+                pbar.set_description(SOURCES.get(key, key))
+                capture = _SourceErrorCapture()
+                log.addHandler(capture)
+                try:
+                    fn(*fn_args)
+                except Exception as exc:
+                    log.error(f"[{key}] Unhandled error: {exc}")
+                finally:
+                    log.removeHandler(capture)
+                if capture.messages:
+                    source_failures[key] = capture.messages
+                # Flush after each source rather than only once at the very end:
+                # bounds how much work is lost if the whole process gets killed
+                # mid-run, while still collapsing repeated date headings within
+                # (and, via the module-level "last date written", across)
+                # sources — see the PENDING_ENTRIES comment block above.
+                n = flush_pending_entries(doc, conn)
+                if n:
+                    log.info(f"[{key}] Wrote {n} entries to {DOC_PATH}")
+                    total_new += n
+                pbar.update(1)
 
-    run("fmprc_conf",    scrape_fmprc,
-        "https://www.fmprc.gov.cn/eng/xw/fyrbt/lxjzh/",
-        "press conference", model, conn, doc, client)
+        run("fmprc_conf",    scrape_fmprc,
+            "https://www.fmprc.gov.cn/eng/xw/fyrbt/lxjzh/",
+            "press conference", model, conn, doc, client)
 
-    run("fmprc_remarks", scrape_fmprc,
-        "https://www.fmprc.gov.cn/eng/xw/fyrbt/fyrbt/",
-        "spokesperson remarks", model, conn, doc, client)
+        run("fmprc_remarks", scrape_fmprc,
+            "https://www.fmprc.gov.cn/eng/xw/fyrbt/fyrbt/",
+            "spokesperson remarks", model, conn, doc, client)
 
-    run("mfa_leadership_speeches", scrape_mfa_leadership,
-        "https://www.mfa.gov.cn/web/ziliao_674904/zyjh_674906/",
-        "leadership speeches", model, conn, doc, client)
+        run("mfa_leadership_speeches", scrape_mfa_leadership,
+            "https://www.mfa.gov.cn/web/ziliao_674904/zyjh_674906/",
+            "leadership speeches", model, conn, doc, client)
 
-    run("mfa_leadership_activity", scrape_mfa_leadership,
-        "https://www.mfa.gov.cn/web/wjdt_674879/wjbxw_674885/",
-        "leadership activity", model, conn, doc, client)
+        run("mfa_leadership_activity", scrape_mfa_leadership,
+            "https://www.mfa.gov.cn/web/wjdt_674879/wjbxw_674885/",
+            "leadership activity", model, conn, doc, client)
 
-    run("mofcom",        scrape_mofcom,     model, conn, doc)
-    run("mofcom_daily",  scrape_mofcom_daily, model, conn, doc)
-    run("mofcom_leadership",      scrape_mofcom_leadership,      model, conn, doc)
-    run("mofcom_dept_leadership", scrape_mofcom_dept_leadership, model, conn, doc)
-    run("mofcom_bureau_heads",    scrape_mofcom_bureau_heads,    model, conn, doc)
-    run("mofcom_special_conf",    scrape_mofcom_special_conf,    model, conn, doc)
-    run("mofcom_lxxwfbh",         scrape_mofcom_lxxwfbh,         model, conn, doc)
-    run("scio",          scrape_scio,       model, conn, doc)
-    run("mnd",           scrape_mnd,        model, conn, doc)
-    run("state",         scrape_state,      model, conn, doc)
-    run("whitehouse",    scrape_whitehouse, model, conn, doc)
-    run("treasury",      scrape_treasury,   model, conn, doc)
-    run("ustr",          scrape_ustr,       model, conn, doc)
-    # "wardept" intentionally not run — see the SOURCES dict comment and
-    # scrape_wardept()'s own DISABLED note.
-    run("x",             scrape_x,          model, conn, doc)
+        run("mofcom",        scrape_mofcom,     model, conn, doc)
+        run("mofcom_daily",  scrape_mofcom_daily, model, conn, doc)
+        run("mofcom_leadership",      scrape_mofcom_leadership,      model, conn, doc)
+        run("mofcom_dept_leadership", scrape_mofcom_dept_leadership, model, conn, doc)
+        run("mofcom_bureau_heads",    scrape_mofcom_bureau_heads,    model, conn, doc)
+        run("mofcom_special_conf",    scrape_mofcom_special_conf,    model, conn, doc)
+        run("mofcom_lxxwfbh",         scrape_mofcom_lxxwfbh,         model, conn, doc)
+        run("scio",          scrape_scio,       model, conn, doc)
+        run("mnd",           scrape_mnd,        model, conn, doc)
+        run("state",         scrape_state,      model, conn, doc)
+        run("whitehouse",    scrape_whitehouse, model, conn, doc)
+        run("treasury",      scrape_treasury,   model, conn, doc)
+        run("ustr",          scrape_ustr,       model, conn, doc)
+        # "wardept" intentionally not run — see the SOURCES dict comment and
+        # scrape_wardept()'s own DISABLED note.
+        run("x",             scrape_x,          model, conn, doc)
 
-    pbar.close()
+        pbar.close()
 
     # The actual per-week document — rendered fresh from the `entries`
     # table (see render_doc_for_range()'s docstring), not a copy of the
