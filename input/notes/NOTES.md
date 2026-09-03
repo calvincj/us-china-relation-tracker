@@ -4225,3 +4225,133 @@ with a fake response) — not `classify_qa_with_llm`'s actual LLM
 judgment, matching test_scraper.py's own established convention of only
 unit-testing pure functions. 111 + 17 = 128 tests total across both
 files, all green.
+
+## 2026-09-03 continued — README rewrite round 2, a real progress-bar bug, date validation, and a YouTube feasibility update
+
+User pushback + new questions, all real and specific:
+
+**"up to an hour?? it can take that long??"** — checked, and the user's
+skepticism was right: every real full-week run logged today (4 of them)
+took 13-15 minutes, none anywhere close to an hour. "A few minutes to
+over an hour" was written before `GEMINI_SLEEP` was cut from 16s to 1s
+to 0.5s (a 32x speedup) and never revised down afterward — a genuinely
+stale estimate, not a hedge that was ever accurate. Replaced with "about
+10 to 15 minutes" everywhere the README mentions run time, based on the
+real logged numbers (13m42s/228k tokens/$0.26, 13m51s/228k/$0.26,
+14m47s/250k/$0.27, 15m2s/246k/$0.26).
+
+**A real, user-visible bug: the progress bar breaking into multiple
+garbled bars.** User pasted a real example (`[mofcom] Failed to fetch
+list via API gateway: [SSL: UNEXPECTED_EOF_WHILE_READING]...` splitting
+the tqdm bar into two overlapping lines). Root cause: `_console_handler`
+is a plain `logging.StreamHandler` — it writes straight to the terminal
+with zero awareness that tqdm has an active progress bar with its own
+cursor-control sequences there. A WARNING/ERROR firing mid-run (any
+real fetch failure, at any moment) lands in the middle of tqdm's own
+redraw, corrupting it. Fixed with `tqdm.contrib.logging.
+logging_redirect_tqdm()` (already available: `tqdm>=4.66.0` is already
+required, this submodule has been stable for years) wrapped around the
+whole per-source dispatch loop in `main()` — every logging handler's
+output gets rerouted through `tqdm.write()` for that whole span, which
+knows to clear the bar, print cleanly, then redraw. Confirmed via a
+direct side-by-side script (deliberately firing `log.warning()` mid-bar
+with and without the redirect active) that the redirect path invokes
+the correct clear-then-redraw mechanism.
+
+**"has [the output-doc-completeness bug] been fixed?"** — yes, confirmed
+still fixed: re-read `render_doc_for_range()` (the 2026-09-02 fix
+already in NOTES.md) line by line again to be sure before answering.
+It queries the durable `entries` table for every entry with a date in
+`[start, end]` regardless of which run wrote it, so re-running an
+already-covered week (or a week you're catching up on in stages) always
+produces a COMPLETE document for that whole range, not just what's new
+in this particular run. This has been exercised for real dozens of
+times today (Aug 25-31 alone was regenerated 4 separate times this
+session, each time correctly including everything found across all
+prior runs, not just the latest one) — not just a code-reading
+assurance. Added an explicit line about this to the README since it's
+a real, recurring point of confusion worth stating plainly rather than
+leaving implicit.
+
+**"have you looked into youtube? could gemini's api access youtube?"**
+— real research, not a guess: confirmed via ai.google.dev/gemini-api/docs/
+video-understanding (fetched live today) that Gemini's API added a
+"video understanding" feature that takes a plain YouTube URL directly as
+input alongside a text prompt (e.g. "summarize this video") — no
+separate transcript-scraping step needed, Gemini reads the video itself.
+Real constraints: public videos only (fine for the White House channel),
+free-tier cap of 8 hours of YouTube video processed per day, and the
+feature is explicitly labeled "in preview... pricing and rate limits are
+likely to change." This changes the original 2026-08 assessment (which
+said YouTube needed custom transcript-scraping infrastructure) — that
+premise may no longer hold. Discovery of new videos would still need the
+channel's own public RSS feed, not Gemini. NOT built — this is a real,
+new capability worth a genuine decision from the user (a "preview,
+pricing may change" feature isn't something to wire in without them
+choosing to), not something to autonomously implement. Documented in
+`input/notes/SOURCES.md` with the source URL and the real constraints,
+flagged for a future decision.
+
+**Date validation added to both interactive launchers**, per direct
+request ("add press control c to stop a run" + "add plz enter valid
+date... or if end date is after today too"):
+
+- Added a Ctrl+C mention to both Mac and Windows run-instructions in the
+  README (the existing behavior already supported it via each process's
+  normal signal handling; it just wasn't documented anywhere a
+  non-technical reader would find it).
+- Mac (`Run Weekly Tracker (Mac).command`): added `validate_date()` +
+  `read_date()` bash functions that loop until a real calendar date is
+  entered, plus a check that the end date isn't after today. Found and
+  fixed TWO real bugs live while building this, not just handed it over
+  untested: (1) macOS's `date -j -f` SILENTLY ROLLS OVER an invalid day
+  instead of rejecting it ("20260230" quietly becomes "20260302") —
+  a naive "did `date` parse this" check would have let a real typo
+  through as a different, wrong date; fixed with a round-trip comparison
+  (re-format the parsed result and check it matches the original input
+  exactly). (2) The retry-loop's own "that's not a valid date" message
+  was being captured INTO the returned date value itself, because it was
+  `echo`'d to stdout inside a function whose stdout is captured via
+  `$(...)` — confirmed live via a real run that produced a scraper.py
+  argument-parsing error with the retry message literally embedded
+  inside the `--start` value. Fixed by sending that message to stderr
+  (`>&2`) instead, which isn't captured by `$(...)`. Live-tested the
+  full flow afterward (invalid date, an impossible calendar date, a
+  future end date, another invalid date, then two valid dates) end to
+  end on this real Mac — every case now behaves correctly, and the
+  script goes on to launch the real scraper with the right date range.
+- Windows: could NOT test on a real Windows machine (none available;
+  tried installing PowerShell via `brew install --cask powershell` to at
+  least test the date-parsing logic cross-platform — only a "preview"
+  cask exists now, and its installer needs an interactive sudo password
+  this environment can't supply, so that attempt was abandoned rather
+  than forced through). Given that real risk of an untested batch-script
+  bug, deliberately did NOT hand-write the validation in batch (which has
+  many well-known quoting/expansion pitfalls, exactly the kind of thing
+  that's hard to get right without a way to test it) — instead moved ALL
+  the interactive logic (questions, date validation via .NET's
+  `[datetime]::TryParseExact`, the final pause) into a new
+  `run_weekly_tracker_windows.ps1`, with `Run Weekly Tracker
+  (Windows).bat` reduced to a thin one-line wrapper
+  (`powershell -ExecutionPolicy Bypass -File ...`) that has almost
+  nothing left in it to get wrong. Still caught 2 real bugs in careful
+  manual re-reading before considering it done, precisely because live
+  testing wasn't possible here: (1) PowerShell's `Read-Host` automatically
+  appends its own ": " to whatever prompt text it's given — the original
+  draft passed "Start date: " (with its own colon already), which would
+  have displayed a doubled "Start date: : "; fixed by passing the prompt
+  text with no trailing colon. (2) `$Host.UI.RawUI.ReadKey(...)` (the
+  "press any key" mechanism) can throw in some PowerShell hosts where raw
+  key input isn't available (the ISE, some restricted/redirected
+  consoles) — switched to `Read-Host` for the final pause instead (needs
+  Enter specifically, not literally any key, but works reliably
+  everywhere a normal console does). This file's real behavior on an
+  actual Windows machine is still UNVERIFIED — flagged honestly as such
+  rather than claimed as tested.
+
+Compiled and re-ran both test suites after all of the above (111 + 17,
+all green) — none of today's changes (tqdm/logging, the two launcher
+scripts, README wording) touch anything test_scraper.py/test_format_
+entry.py actually cover, so this confirms no regression rather than
+exercising the new behavior itself (which needed live testing instead,
+see above).

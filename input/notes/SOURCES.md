@@ -100,11 +100,26 @@ live 2026-09-03 — see NOTES.md.
   account owner's API credentials or an unofficial mirror/aggregator; both
   MFA's and MOFCOM's WeChat are marked "less important" in the source doc
   itself, so this is a low-cost thing to defer.
-- **YouTube channel**: would need transcript scraping + a relevance filter
-  over an entire channel's uploads with no dedicated "China" playlist; higher
-  effort than the direct press-release/spokesperson text sources for
-  comparatively thin incremental coverage (White House press conferences are
-  already covered in text form via `whitehouse`).
+- **YouTube channel**: originally assessed 2026-08 as needing custom
+  transcript-scraping infrastructure + a relevance filter over an entire
+  channel's uploads with no dedicated "China" playlist — higher effort
+  than the direct press-release/spokesperson text sources for
+  comparatively thin incremental coverage (White House press conferences
+  are already covered in text form via `whitehouse`). **Worth
+  re-assessing, 2026-09-03**: Gemini's API added a "video understanding"
+  feature (confirmed via ai.google.dev/gemini-api/docs/video-understanding,
+  live-checked today) that can take a plain YouTube URL directly as
+  input alongside a text prompt — no transcript-scraping step needed at
+  all, Gemini reads the video itself. Real constraints found in the docs:
+  public videos only (fine, the WhiteHouse channel is public), free-tier
+  cap of 8 hours of YouTube video processed per day, and the feature is
+  explicitly labeled "in preview... pricing and rate limits are likely to
+  change." Discovery (which new videos exist) would still need the
+  channel's own public RSS feed
+  (`https://www.youtube.com/feeds/videos.xml?channel_id=...`) — that part
+  doesn't need Gemini at all. Not built — this needs a real decision from
+  the user given the "preview, may start costing money" caveat, not an
+  autonomous build. Flagged, not implemented.
 - **Dept of War (war.gov)**: removed from active dispatch 2026-09-02 after
   thorough investigation. Every article page (and the homepage) returns a
   flat 403 for any non-browser client — confirmed identical against plain
