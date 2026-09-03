@@ -442,9 +442,9 @@ def select_relevant_chinese_paragraphs(raw_zh_text: str) -> list[str]:
     an LLM call. Deliberately narrower than the general-purpose extraction
     prompt it replaces: "does this paragraph name the US" is a simpler,
     fully reproducible rule, at the cost of missing a paragraph that's
-    relevant only by implication (no literal US mention). Not used for MFA
-    leadership sources, whose actual editorial bar is broader than "mentions
-    the US" — see extract_key_paragraphs(general=True)'s docstring.
+    relevant only by implication (no literal US mention). Used by every
+    Chinese-source caller as of 2026-09-03, MFA leadership included — see
+    finalize_release_item()'s `raw_zh_text` parameter.
     """
     paragraphs = [p.strip() for p in raw_zh_text.split("\n") if p.strip()]
     return [p for p in paragraphs if _CHINESE_US_MENTION_RE.search(p)]
@@ -1401,7 +1401,7 @@ _REFUSAL_RE = re.compile(
 
 
 def extract_key_paragraphs(
-    model: genai.Client, text: str, n: int = 4, general: bool = False,
+    model: genai.Client, text: str, n: int = 4,
 ) -> list[str]:
     """
     Extract the most important verbatim paragraphs from a release/statement.
@@ -1412,60 +1412,36 @@ def extract_key_paragraphs(
     text does not contain..." — was itself written into the tracker doc as
     if it were body content; see NOTES.md, 2026-08-04.)
 
-    `general=True` drops the "must be about China/US-China relations/trade/
-    Taiwan" requirement — for top-PRC-leadership sources (MFA leadership
-    speeches/activity) where backtesting against the past trackers showed
-    the actual editorial bar is "is this substantive Chinese foreign-policy
-    activity", not "does it explicitly mention the US" — e.g. Wang Yi
-    speaking at a Global Development Initiative anniversary event, or
-    meeting the Iranian/Pakistani/Egyptian FM, are tracked even with no US
-    mention anywhere in the readout. See NOTES.md, 2026-08-04.
+    Used to take a `general=True` mode that dropped the "must be about
+    China/US-China relations" requirement, for MFA leadership sources on
+    the theory that their real editorial bar was broader than that.
+    Retired 2026-09-03: the one past-tracker example that justified it
+    turned out to be a human coding error in the original tracker, and
+    with that gone, `general=True` was actively unsafe — a real live run
+    used it to approve a Wang Yi/India-border readout with zero US
+    mentions anywhere, purely because a free keyword pre-filter upstream
+    matched "Tibet" as a shared topic. MFA leadership now uses
+    select_relevant_chinese_paragraphs() via finalize_release_item()'s
+    `raw_zh_text` parameter instead, same as every other Chinese source.
+    See NOTES.md, 2026-09-03, for the full story.
     """
     # Same windowing fix as classify_relevance's _relevance_snippet(): a
     # naive prefix cutoff can miss the actual relevant paragraph in a long
-    # document that opens with boilerplate. Use the non-general keyword
-    # list to locate a hit even in `general` mode (general mode only
-    # relaxes what counts as worth INCLUDING once a paragraph is a
-    # candidate, not the sense of "where is anything China-related at all"
-    # used just to place the window).
+    # document that opens with boilerplate.
     keyword_hit = US_SOURCE_RELEVANCE_KEYWORDS.search(text)
     # NOT max_chars=5000 — see _relevance_snippet's docstring on why that
     # collided with _call_groq's own prompt-size cap once Groq is the one
     # actually serving the call. Use the same 3000-char default as
     # classify_relevance.
     snippet = _relevance_snippet(text, keyword_hit) if keyword_hit else text[:3000]
-    if general:
-        prompt = (
-            f"Extract UP TO {n} verbatim paragraphs from this Chinese "
-            f"leadership statement/speech/readout — the ones that convey "
-            f"its substantive content (what was said or agreed), not "
-            f"protocol boilerplate (attendee lists, pleasantries). Return "
-            f"FEWER than {n} if that's all that's genuinely substantive — "
-            f"do not pad the count with a weaker paragraph just to reach "
-            f"{n}. This includes generic friendship language even when "
-            f"it's the OTHER side's whole paragraph — e.g. skip a "
-            f"paragraph that only says something like 'the two countries "
-            f"are close neighbors with a long history of friendship, "
-            f"committed to deepening cooperation and mutual benefit' with "
-            f"no specific agreement, action, or topic named — that is a "
-            f"pleasantry, not substance, even though it can run several "
-            f"sentences long and even mention things like 'strategic "
-            f"dialogue' in passing without actually committing to anything "
-            f"concrete. "
-            f"Return each paragraph separated by the delimiter '|||'. "
-            f"Do not summarize or paraphrase — use exact text. "
-            f"If the text has NO substantive content at all (pure protocol/"
-            f"scheduling notice, or only pleasantries), return exactly: NONE\n\n{snippet}"
-        )
-    else:
-        prompt = (
-            f"Extract the {n} most important verbatim paragraphs about China, US-China "
-            f"relations, trade, or Taiwan from this text. "
-            f"Return each paragraph separated by the delimiter '|||'. "
-            f"Do not summarize or paraphrase — use exact text. "
-            f"If NO paragraph in the text actually discusses China, US-China relations, "
-            f"trade, or Taiwan, return exactly: NONE\n\n{snippet}"
-        )
+    prompt = (
+        f"Extract the {n} most important verbatim paragraphs about China, US-China "
+        f"relations, trade, or Taiwan from this text. "
+        f"Return each paragraph separated by the delimiter '|||'. "
+        f"Do not summarize or paraphrase — use exact text. "
+        f"If NO paragraph in the text actually discusses China, US-China relations, "
+        f"trade, or Taiwan, return exactly: NONE\n\n{snippet}"
+    )
     result = call_llm(model, prompt, label="extract_key_paragraphs")
     if re.match(r"^\s*NONE\b", result, re.IGNORECASE):
         # Model sometimes adds trailing commentary, e.g. "NONE (since only
@@ -3269,7 +3245,6 @@ def finalize_release_item(
     source_name: str,
     conn: sqlite3.Connection,
     spokespersons: set[str] | None = None,
-    general: bool = False,
     raw_zh_text: str | None = None,
 ) -> bool:
     """Re-check whether this page is actually a genuine Q&A press
@@ -3277,28 +3252,13 @@ def finalize_release_item(
     extraction; generate the summary+anchor and queue the entry. Returns
     True if something was queued.
 
-    `general`: see extract_key_paragraphs() — DEPRECATED as of 2026-09-03,
-    kept only for backward compatibility. Its whole premise ("this
-    source's editorial bar is 'substantive Chinese leadership activity',
-    broader than 'explicitly mentions US-China relations'") rested on one
-    past-tracker example (a 2026-07-28 Wang Yi/Global Development
-    Initiative entry with no US mention) that the user has since confirmed
-    was itself a human coding error in the original tracker — not a real
-    editorial exception. With that evidence gone, `general=True` has no
-    remaining justification and is actively unsafe: a real live run
-    (2026-09-03) used it to write up a Wang Yi/India-border-consensus
-    readout with ZERO US mentions anywhere in the source article, purely
-    because the free keyword pre-filter matched "Tibet" (a shared topic,
-    not a US signal). Pass `raw_zh_text` instead (below) for any Chinese-
-    origin caller — MFA leadership now does.
-
     `raw_zh_text`: the ORIGINAL, untranslated Chinese text, for
     Chinese-source callers. When set, the non-Q&A branch below uses
     select_relevant_chinese_paragraphs() (a narrow, explicit "does this
     paragraph name the US" keyword check — same one finalize_qa_item()'s
     own no-exchanges fallback already uses for fmprc/mofcom/mnd) instead
-    of extract_key_paragraphs()'s LLM judgment call, and `general` is
-    ignored. Leave unset for English-original sources."""
+    of extract_key_paragraphs()'s LLM judgment call. Leave unset for
+    English-original sources."""
     paragraphs = [p.strip() for p in plain.split("\n") if p.strip()]
     paragraphs = [_unbracket_label(p) for p in paragraphs]
     paragraphs = _merge_orphan_speaker_labels(paragraphs)
@@ -3318,8 +3278,7 @@ def finalize_release_item(
 
     if raw_zh_text is not None:
         # Narrow, explicit "does this paragraph name the US" gate — see
-        # this function's own docstring for why this replaces the old
-        # general=True LLM judgment call for Chinese-source callers.
+        # this function's own docstring.
         zh_paras = select_relevant_chinese_paragraphs(raw_zh_text)
         if not zh_paras:
             log.info(f"[{tag}] No US-mentioning paragraphs found — skipping: {url}")
@@ -3331,7 +3290,7 @@ def finalize_release_item(
         translated_block = translate_to_english(model, "\n\n".join(zh_paras))
         paras = [p.strip() for p in translated_block.split("\n\n") if p.strip()]
     else:
-        paras = extract_key_paragraphs(model, plain, general=general)
+        paras = extract_key_paragraphs(model, plain)
     if not paras:
         log.info(f"[{tag}] No China-relevant paragraphs found — skipping: {url}")
         flag_for_review(url, plain[:80], "extract_key_paragraphs found no relevant paragraphs")
@@ -4411,8 +4370,8 @@ def process_mfa_leadership_item(
         log.info(f"[{tag}] Translating: {url}")
         translated = translate_to_english(model, plain_cn[:7000])
 
-        # raw_zh_text=plain_cn, NOT general=True — see finalize_release_item's
-        # docstring for why the old general=True bar ("substantive Chinese
+        # raw_zh_text=plain_cn — see extract_key_paragraphs()'s docstring
+        # for why the old general=True bar ("substantive Chinese
         # leadership activity", no US mention required) was retired
         # 2026-09-03: it let a Wang Yi/India-border readout with zero US
         # mentions through, purely because the free keyword pre-filter

@@ -118,6 +118,26 @@ def extract_date(text: str) -> datetime | None:
     return None
 
 
+_PURE_DATE_LINE_RE = re.compile(
+    r'^\s*(\d{4}-\d{2}-\d{2}|'
+    r'(?:January|February|March|April|May|June|July|August|'
+    r'September|October|November|December)\s+\d{1,2},\s+\d{4})\s*$'
+)
+
+
+def _is_pure_date_line(paragraph: str) -> bool:
+    """True if a paragraph is JUST a date, nothing else — a masthead-style
+    leading line ("June 18, 2026") that a pasted transcript often carries.
+    Its date is already pulled out separately by extract_date() for the
+    entry's own heading, so leaving the same line in `paragraphs` too just
+    means it ends up as a stray, contentless line in the finished tracker
+    entry — not wrong (classify_qa_with_llm now handles it safely either
+    way, see that function's docstring for the real misalignment bug this
+    line surfaced), just worth skipping since it was never actually part
+    of what anyone said."""
+    return bool(_PURE_DATE_LINE_RE.match(paragraph))
+
+
 # ── LLM helpers ───────────────────────────────────────────────────────────────
 
 def translate_to_english(client, text: str) -> str:
@@ -165,6 +185,17 @@ def classify_qa_with_llm(client, paragraphs: list[str]) -> list[dict]:
 
     A can follow A (multi-paragraph answers are common).
     Documents with no Q at all (press releases, white papers) are valid — everything A/CONT.
+
+    The response is matched back to each paragraph by an explicit
+    "paragraph" number field, NOT by trusting the returned array's
+    position to line up with the input list. Found live, 2026-09-03: when
+    a paragraph the model considered awkward to classify (e.g. a bare
+    "June 18, 2026" date line with no real speaker at all) made it quietly
+    omit that one entry from its response, EVERY subsequent label silently
+    shifted by one position relative to the real paragraphs — Lin Jian's
+    real answer got labeled with the reporter's outlet name, and vice
+    versa, with nothing to catch the mismatch. Reproduced 3 times in a
+    row on the same real input before this fix.
     """
     if not paragraphs:
         return []
@@ -187,15 +218,23 @@ def classify_qa_with_llm(client, paragraphs: list[str]) -> list[dict]:
         "any government official or ministry\n"
         "  Q:    Reuters, AFP, CNN, Bloomberg, AP, BBC, any reporter or media outlet\n"
         "  CONT: paragraph has NO speaker label (no 'Name: ' prefix) — continuing "
-        "the previous official's answer\n\n"
+        "the previous official's answer, OR a stray line (like a bare date) that "
+        "isn't really anyone speaking at all\n\n"
         "Additional rules:\n"
         "- A can follow A (an official may give multiple consecutive paragraphs)\n"
         "- If NO questions exist at all (white paper, statement, readout), classify "
         "everything as A or CONT — that is correct\n"
-        "- The 'speaker' field is the name/outlet before the colon, or null for CONT\n\n"
-        "Return ONLY a valid JSON array — one object per paragraph, in order:\n"
-        '[{"type":"Q","speaker":"Reuters"},{"type":"A","speaker":"Lin Jian"},'
-        '{"type":"CONT","speaker":null},...]\n\n'
+        "- The 'speaker' field is the name/outlet before the colon, or null for CONT\n"
+        "- EVERY paragraph number, 1 through "
+        f"{len(paragraphs)}, MUST appear exactly once in your response — do not "
+        "skip a paragraph just because it's hard to classify; use CONT with a "
+        "null speaker for anything that isn't really a labeled turn.\n\n"
+        "Return ONLY a valid JSON array — one object per paragraph, including "
+        "its number, so your response can be matched back to the right "
+        "paragraph even if you reorder or skip one by mistake:\n"
+        '[{"paragraph":1,"type":"Q","speaker":"Reuters"},'
+        '{"paragraph":2,"type":"A","speaker":"Lin Jian"},'
+        '{"paragraph":3,"type":"CONT","speaker":null},...]\n\n'
         f"Paragraphs:\n{numbered}",
     )
 
@@ -203,17 +242,27 @@ def classify_qa_with_llm(client, paragraphs: list[str]) -> list[dict]:
     cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', result.strip(), flags=re.MULTILINE)
 
     try:
-        labels = json.loads(cleaned)
+        labels_list = json.loads(cleaned)
     except json.JSONDecodeError:
         m = re.search(r'\[.*\]', cleaned, re.DOTALL)
         try:
-            labels = json.loads(m.group(0)) if m else []
+            labels_list = json.loads(m.group(0)) if m else []
         except Exception:
-            labels = []
+            labels_list = []
+
+    # Keyed by paragraph NUMBER (1-indexed, as asked for), not by list
+    # position — see this function's own docstring for why. A malformed
+    # or missing "paragraph" field on any one entry just means that
+    # specific entry can't be matched (falls through to the safe CONT
+    # default below) rather than throwing off every later paragraph too.
+    labels_by_num: dict[int, dict] = {}
+    for entry in labels_list if isinstance(labels_list, list) else []:
+        if isinstance(entry, dict) and isinstance(entry.get("paragraph"), int):
+            labels_by_num[entry["paragraph"]] = entry
 
     exchanges = []
     for i, para in enumerate(paragraphs):
-        label = labels[i] if i < len(labels) else {"type": "A", "speaker": None}
+        label = labels_by_num.get(i + 1, {"type": "CONT", "speaker": None})
         ex_type = str(label.get("type", "A")).upper()
         if ex_type not in ("Q", "A", "CONT"):
             ex_type = "A"
@@ -312,8 +361,13 @@ def main() -> None:
 
     # ── Preprocess and detect ────────────────────────────────────────────────
     paragraphs = preprocess_text(working_text)
-    content_type = args.type or detect_content_type(paragraphs)
     date = extract_date(working_text) or datetime.now()
+    # Drop a standalone masthead date line ("June 18, 2026") now that its
+    # date has already been pulled out above — see _is_pure_date_line()'s
+    # docstring. Only strips a paragraph that's PURELY a date; a line that
+    # happens to mention a date within real sentence content is untouched.
+    paragraphs = [p for p in paragraphs if not _is_pure_date_line(p)]
+    content_type = args.type or detect_content_type(paragraphs)
 
     print(f'type: {content_type}  |  date: {date.strftime("%Y-%m-%d")}  |  paragraphs: {len(paragraphs)}')
 

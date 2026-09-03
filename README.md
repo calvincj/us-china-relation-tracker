@@ -148,7 +148,8 @@ will accept requests. This is expected and not a sign anything is wrong.
 |---|---|
 | `code/scraper.py` | Main program — one function per source it checks |
 | `code/backtest.py` | Checks the program's work against a real past tracker week (used for development, not normal use) |
-| `code/test_scraper.py` | Automated tests — run with `python code/test_scraper.py` |
+| `code/test_scraper.py` | Automated tests for the main program — run with `python code/test_scraper.py` |
+| `code/test_format_entry.py` | Automated tests for the manual add-an-entry tool — run with `python code/test_format_entry.py` |
 | `code/seed_dedup_db.py` | The one-time setup script from Step 4 above |
 | `code/format_entry.py` | The manual add-an-entry tool from above |
 | `Run Weekly Tracker (Mac).app` | The Mac icon to double-click |

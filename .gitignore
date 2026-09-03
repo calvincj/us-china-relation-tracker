@@ -5,7 +5,7 @@
 # output doc, cost/review logs, the X account cache — see output/ in README.md
 output/
 
-# run_daily.sh logs
+# logs from run_scheduled.sh / run_week.sh runs
 logs/
 
 # Python
