@@ -4138,3 +4138,90 @@ attempted for the shell/batch launchers themselves — matches this
 project's existing convention of verifying shell-script changes via
 direct execution/inspection rather than unit tests, since they have no
 pure-function logic to test).
+
+## 2026-09-03 continued — verified GitHub is complete, removed genuinely dead code, found a real bug in format_entry.py
+
+User asked for a general pass: confirm everything needed to run is
+really on GitHub, clean up unnecessary comments, and keep looking for
+bugs.
+
+**GitHub completeness**: did a real fresh `git clone` into a scratch
+directory (not just `git ls-files`), copied in a real `.env`, ran `pip
+install -r requirements.txt`, `python code/seed_dedup_db.py`, and
+`python code/scraper.py --source ustr` end to end — all worked
+correctly, including the error-report and Truth-Social-reminder features
+from earlier today. Confirms the repo is genuinely self-contained, not
+just superficially. Also fixed a stale `.gitignore` comment referencing
+`run_daily.sh`, a name the launcher hasn't had since early in the
+project (it's `run_scheduled.sh` now).
+
+**Removed genuinely dead code**: `extract_key_paragraphs()`'s
+`general=True` branch and `finalize_release_item()`'s `general`
+parameter — confirmed via a real usage search that NO caller passes
+`general=True` anymore (MFA leadership switched to `raw_zh_text` earlier
+today; see the classify_relevance chinese_origin entry above). This
+wasn't just "an unnecessary comment" — the whole branch was unreachable,
+and leaving working-but-buggy code reachable via a parameter is a real
+landmine for a future re-introduction of the exact bug already found and
+fixed once. Deleted the branch, simplified both function signatures,
+and rewrote `extract_key_paragraphs()`'s docstring to explain what
+`general=True` used to do and why it was retired, since the history is
+still worth knowing even with the code gone. Also fixed a real, now-
+stale comment found in the same area: `select_relevant_chinese_
+paragraphs()`'s docstring still said "Not used for MFA leadership
+sources" — false as of today's earlier fix, corrected to say it's used
+by every Chinese-source caller including MFA leadership now.
+
+**Fixed two more stale entries in `input/notes/SOURCES.md`**: the
+MOFCOM weekly-press-conference row still said "not added — listing page
+not yet built," contradicting the `mofcom_lxxwfbh` source built earlier
+today for exactly that URL — updated to ✅. The "Candidates found via
+backtesting" table still listed MOFCOM's `/xwfbzt/` pages as an
+unresolved discovery gap for the same reason — removed that row, noted
+it as resolved.
+
+**Real bug found in `code/format_entry.py`** (the manual add-an-entry
+tool — separate from the main scraper, never covered by test_scraper.py
+at all): tested it end-to-end on its own sample file
+(`input/notes/sample_qa.txt`) as part of "make sure it all works," and
+found `classify_qa_with_llm()` silently produces WRONG speaker
+assignments. Root cause: the function numbers paragraphs 1-N in its
+prompt, asks the model to classify each, then assumes the model's
+returned JSON array's POSITION lines up with the input list
+(`labels[i]`) — with no check. When the model finds one paragraph
+awkward to classify (in the real case, a bare "June 18, 2026" masthead
+date line with no real speaker) and quietly omits it from its response,
+every SUBSEQUENT label silently shifts by one position: the reporter's
+real question got labeled as Lin Jian's answer, and Lin Jian's real
+answer got the wrong treatment too — reproduced 3 times in a row on the
+same real input, not a one-off. This is exactly the failure mode
+`code/scraper.py`'s own Q&A parsing already learned to avoid (see
+`parse_qa_from_plaintext`'s "regex-first, LLM-as-last-resort" docstring)
+— `format_entry.py` never got that lesson applied to it since it's a
+separate, standalone tool.
+
+Fixed by having the model echo back an explicit `"paragraph"` number on
+every returned object, then matching responses back to input paragraphs
+by that number (a dict lookup) instead of by list position — a paragraph
+the model omits now safely falls back to a plain CONT/no-speaker default
+(inert, doesn't corrupt anything downstream) instead of shifting every
+later paragraph's real label onto the wrong text. Also strengthened the
+prompt itself to explicitly require every paragraph number to appear
+exactly once. Live-verified 3 times after the fix: consistent, correct
+speaker assignment every time.
+
+While fixing this, also noticed the masthead date line itself ("June 18,
+2026") was rendering as its own stray, contentless paragraph in the
+finished entry once the misalignment bug no longer masked it — its date
+was already being extracted separately for the entry's own heading, so
+the raw line was pure redundancy. Added `_is_pure_date_line()` and
+filtered it out of the paragraphs sent to Q&A classification.
+
+Added `code/test_format_entry.py` — this file had ZERO test coverage
+before today. 17 tests covering the pure functions (`preprocess_text`,
+`detect_content_type`, `detect_language`, `extract_date`,
+`_is_pure_date_line`, and the paragraph-number-matching logic itself
+with a fake response) — not `classify_qa_with_llm`'s actual LLM
+judgment, matching test_scraper.py's own established convention of only
+unit-testing pure functions. 111 + 17 = 128 tests total across both
+files, all green.

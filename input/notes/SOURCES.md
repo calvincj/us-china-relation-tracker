@@ -17,7 +17,7 @@ programmatically scrapable without paid API / login / unofficial mirror.
 | MFA spokesperson remarks | https://www.fmprc.gov.cn/eng/xw/fyrbt/fyrbt/ | EN | normal | static | ✅ `fmprc_remarks` |
 | MFA leadership speeches | https://www.mfa.gov.cn/web/ziliao_674904/zyjh_674906/ | ZH | normal | static + translate | ✅ `fmprc_leadership_speeches` (added this session) |
 | MFA leadership activity | https://www.mfa.gov.cn/web/wjdt_674879/wjbxw_674885/ | ZH | normal | static + translate | ✅ `fmprc_leadership_activity` (added this session) |
-| MOFCOM weekly press conferences | https://www.mofcom.gov.cn/xwfb/lxxwfbh/index.html | ZH | normal | static | not added — listing page for this specific weekly-conference index not yet built; see `xwfyrth` row below, which `mofcom` now also covers |
+| MOFCOM weekly press conferences | https://www.mofcom.gov.cn/xwfb/lxxwfbh/index.html | ZH | normal | static | ✅ `mofcom_lxxwfbh` (added 2026-09-03) — found via a real Aug 27, 2026 ground-truth entry (Spokesperson Huang Ling on a proposed U.S. tariff hike) that turned out to live at `/xwfbzt/YYYY/swbzklxxwfbhYYYYnMyDr/index.html`, a per-date directory this index links to; date is parsed straight from that URL slug for the same early-stop pattern as Treasury/USTR/SCIO |
 | MOFCOM daily spokesperson remarks | https://www.mofcom.gov.cn/xwfb/xwfyrth/index.html | ZH | normal | static + translate | ✅ `mofcom` (article-level handling only, added 2026-08-04 — **correction**: this was previously marked "redundant with the English mirror," which backtest.py disproved — a real past-tracker entry was sourced directly from this Chinese page, with content not confirmed present on the English mirror. `process_mofcom_item` now CJK-detects and translates when it hits one of these URLs; list-page discovery for this specific index still only happens via the English mirror below, so Chinese-only items that never got mirrored won't be found yet — that's the next gap to close here) |
 | MOFCOM daily spokesperson remarks | https://english.mofcom.gov.cn/News/PressConference/index.html | EN | normal | static | ✅ `mofcom` |
 | MOFCOM leadership activity | https://www.mofcom.gov.cn/xwfb/ldrhd/index.html | ZH | normal | static + translate | ✅ `mofcom_leadership` (added 2026-08-05) |
@@ -137,8 +137,9 @@ original links doc, but appearing in real past-tracker entries) surfaced:
 |---|---|---|
 | Xinhua (news.cn) | http://www.news.cn/ | PRC state media wire service; appeared in a Dec 2025 ground-truth entry. Worth a `scrape_xinhua` module if it recurs — not yet assessed for scrape feasibility. |
 | Chinese Embassy in the US (own site) | https://us.china-embassy.gov.cn/ | Distinct from its X account (already correctly out of scope) — this is the embassy's own website, static HTML in principle. Not yet assessed. |
-| MOFCOM special-topic pages (`/xwfbzt/`) | e.g. https://www.mofcom.gov.cn/xwfbzt/2026/swbzklxxwfbh2026n8y27r/index.html | Found via a real Aug 27, 2026 ground-truth entry (Spokesperson Huang Ling on the proposed U.S. tariff hike) — a URL namespace distinct from the already-covered `ztxwfbh` special-PRESS-CONFERENCE index (`/xwfb/ztxwfbh/index.html`). `process_mofcom_item` handles the page fine once it has the URL (confirmed via `backtest.py`) — this is a DISCOVERY gap only. `/xwfbzt/index.html` itself is a general topic-hub page (RCEP, e-commerce, consumer-promotion campaigns, etc.), not a dated feed of individual press conferences, so there's no obvious listing to walk. One sighting so far — worth another look if it recurs. |
 
-All three are one-off sightings so far (one ground-truth week each) —
-worth re-checking after a few more backtest weeks before committing to
-building any of them.
+Both are one-off sightings so far (one ground-truth week each) — worth
+re-checking after a few more backtest weeks before committing to
+building either. (A third candidate that was here, MOFCOM's `/xwfbzt/`
+special-topic pages, has since been resolved — see `mofcom_lxxwfbh` in
+the PRC Government table above.)
