@@ -778,6 +778,17 @@ class TestHallucinatedOfficials(unittest.TestCase):
         source = "Secretary Bessent said the economy remains strong."
         self.assertEqual(S._hallucinated_officials(summary, source), [])
 
+    def test_case_insensitive_match_against_an_all_caps_transcript_label(self):
+        # Real bug, live 2026-09-03: a real State Department interview
+        # transcript labels its speaker "SECRETARY RUBIO:" (all caps, a
+        # common transcript convention) — a case-sensitive check missed
+        # this entirely and falsely flagged a correctly-named summary as
+        # a hallucination, triggering a needless (and less accurate)
+        # regeneration.
+        summary = "Secretary of State Marco Rubio discussed the Venezuela oil deal."
+        source = "SECRETARY RUBIO: This arrangement benefits US energy security."
+        self.assertEqual(S._hallucinated_officials(summary, source), [])
+
     def test_no_names_in_summary_is_clean(self):
         summary = "The Treasury Department released a new report on trade."
         source = "This report covers trade statistics for the past year."
