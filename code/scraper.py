@@ -3524,7 +3524,10 @@ def scrape_fmprc(
     log.info(f"[fmprc/{label}] {len(new_links)} new items")
 
     for url, title in new_links:
-        process_fmprc_item(url, title, label, model, conn, client)
+        try:
+            process_fmprc_item(url, title, label, model, conn, client)
+        except Exception as exc:
+            log.error(f"[fmprc/{label}] Error on {url}: {exc}")
 
 
 # ── Source: MOFCOM ────────────────────────────────────────────────────────────
@@ -3612,7 +3615,10 @@ def scrape_mofcom(
     log.info(f"[mofcom] {len(new_links)} new items")
 
     for url, title in new_links:
-        process_mofcom_item(url, title, model, conn, client)
+        try:
+            process_mofcom_item(url, title, model, conn, client)
+        except Exception as exc:
+            log.error(f"[mofcom] Error on {url}: {exc}")
 
 
 # All of MOFCOM's Chinese-language xwfb/* index pages run the identical JS
@@ -3668,7 +3674,10 @@ def scrape_mofcom_section(
     log.info(f"[{tag}] {len(new_links)} new items")
 
     for url, title in new_links:
-        process_mofcom_item(url, title, model, conn, client)
+        try:
+            process_mofcom_item(url, title, model, conn, client)
+        except Exception as exc:
+            log.error(f"[{tag}] Error on {url}: {exc}")
 
 
 def scrape_mofcom_daily(model: genai.Client, conn: sqlite3.Connection, doc: Document) -> None:
@@ -3748,7 +3757,10 @@ def scrape_mofcom_lxxwfbh(model: genai.Client, conn: sqlite3.Connection, doc: Do
     log.info(f"[{tag}] {len(new_items)} new items")
 
     for url, title, item_date in new_items:
-        process_mofcom_item(url, title, model, conn, client, known_date=item_date)
+        try:
+            process_mofcom_item(url, title, model, conn, client, known_date=item_date)
+        except Exception as exc:
+            log.error(f"[{tag}] Error on {url}: {exc}")
 
 
 def process_mofcom_item(
@@ -4068,7 +4080,10 @@ def scrape_treasury(
     log.info(f"[treasury] {len(new_links)} new items")
 
     for url, title, item_date in new_links:
-        process_treasury_item(url, title, model, conn, client, known_date=item_date)
+        try:
+            process_treasury_item(url, title, model, conn, client, known_date=item_date)
+        except Exception as exc:
+            log.error(f"[treasury] Error on {url}: {exc}")
 
 
 def process_treasury_item(
@@ -4162,7 +4177,10 @@ def scrape_ustr(
     log.info(f"[ustr] {len(new_links)} new items")
 
     for url, title, item_date in new_links:
-        process_ustr_item(url, title, model, conn, client, known_date=item_date)
+        try:
+            process_ustr_item(url, title, model, conn, client, known_date=item_date)
+        except Exception as exc:
+            log.error(f"[ustr] Error on {url}: {exc}")
 
 
 def process_ustr_item(
@@ -4363,7 +4381,10 @@ def scrape_mfa_leadership(
     log.info(f"[mfa_leadership/{label}] {len(new_links)} new items")
 
     for url, title in new_links:
-        process_mfa_leadership_item(url, title, label, model, conn, client)
+        try:
+            process_mfa_leadership_item(url, title, label, model, conn, client)
+        except Exception as exc:
+            log.error(f"[mfa_leadership/{label}] Error on {url}: {exc}")
 
 
 def process_mfa_leadership_item(
@@ -4544,7 +4565,10 @@ def scrape_scio(
     log.info(f"[scio] {len(new_items)} new items")
 
     for url, title, item_date in new_items:
-        process_scio_item(url, title, model, conn, client, known_date=item_date)
+        try:
+            process_scio_item(url, title, model, conn, client, known_date=item_date)
+        except Exception as exc:
+            log.error(f"[scio] Error on {url}: {exc}")
 
 
 def process_scio_item(
@@ -4651,7 +4675,10 @@ def scrape_mnd(
     log.info(f"[mnd] {len(new_links)} new items")
 
     for url, title in new_links:
-        process_mnd_item(url, title, model, conn, client)
+        try:
+            process_mnd_item(url, title, model, conn, client)
+        except Exception as exc:
+            log.error(f"[mnd] Error on {url}: {exc}")
 
 
 def process_mnd_item(
@@ -5044,7 +5071,10 @@ def scrape_x(model: genai.Client, conn: sqlite3.Connection, doc: Document) -> No
         log.info(f"[x/{group_key}] {len(tweets)} new matching tweets since last run")
 
         for tweet in tweets:
-            process_x_tweet(tweet.get("username", "?"), tweet, model, conn)
+            try:
+                process_x_tweet(tweet.get("username", "?"), tweet, model, conn)
+            except Exception as exc:
+                log.error(f"[x/{group_key}] Error on tweet {tweet.get('id', '?')}: {exc}")
 
         # Explicit max(), not tweets[0] — search results are typically
         # newest-first but that's not a documented guarantee the way it

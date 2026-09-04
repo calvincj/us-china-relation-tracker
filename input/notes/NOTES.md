@@ -4527,3 +4527,64 @@ green (none of them call the real API, so this doesn't exercise the
 live-model change itself — that was checked separately via the real
 `classify_relevance()` call above, per this project's standing rule of
 verifying against live data rather than assuming).
+
+2026-09-04: user's coworker ran a fresh Aug 25-31 week and got exactly
+ONE entry despite a 20-minute, real-money run — investigated why.
+Confirmed her key IS actually linked to billing (ruling out the
+Gemini free-tier 20-requests/day quota bug from 2026-08-04), and tested
+directly whether the new gemini-3.6-flash model's now-mandatory
+thinking corrupts structured JSON output: ran 6 real transcripts
+through `parse_qa_with_llm()` (the exact call path, same thinking
+config the pipeline uses) — 0/6 failed or produced malformed JSON. So
+thinking-induced output corruption was NOT reproduced directly.
+
+While checking that, found a real, separate, more serious structural
+bug: **every per-source item loop except state/whitehouse had no
+per-item error handling.** e.g. `scrape_fmprc`'s loop was just
+`for url, title in new_links: process_fmprc_item(...)` — no try/except.
+If Gemini raised ANY unhandled exception on one item (a 429 with no
+fallback configured, a genuine transient error, anything) processing
+the very NEXT item in that source's list never happens at all — the
+whole loop dies right there, silently, and the run just moves to the
+next source. Only `state` and `whitehouse` already wrapped each item in
+`try/except Exception as exc: log.error(f"[tag] Error on {url}: {exc}")`
+— every other source (fmprc x2, mofcom x3, mofcom_lxxwfbh, treasury,
+ustr, mfa_leadership, scio, mnd, and the X tweet loop) did not. This
+exactly matches the coworker's symptom shape: her one surviving entry
+came from mfa_leadership_activity (the 4th source in dispatch order) —
+consistent with the first 3 sources finding nothing that week, one real
+item processing successfully in the 4th, then a single failure (429,
+quota, model migration timing, or anything else) permanently killing
+the rest of that source's list and — if the failure condition persisted
+(Gemini's cooldown mechanism keeps skipping straight back to a
+no-fallback failure once triggered) — every source after it too.
+Whether the ORIGINAL trigger was rate-limiting from the new model's
+higher per-call token cost (thinking overhead measured earlier today at
+~80-235 extra tokens/call) tipping her account over some per-minute
+limit, a stale pre-migration checkout still hitting the retired
+gemini-2.5-flash 404, her own local code change, or something else
+entirely, this gap is what turns "one call failed" into "the whole run
+is nearly empty" with zero visible indication why. Worth noting this
+predates today's model migration entirely — it's a pre-existing
+robustness gap that any transient failure could have triggered, not
+something introduced by the migration.
+
+Fixed by wrapping every one of those loop bodies in the same
+try/except pattern state/whitehouse already used, so one item's failure
+just gets logged and skipped — the loop moves on to the next item
+instead of abandoning the rest of the source. Verified with a live
+isolated reproduction (patched `process_fmprc_item` to fail on one
+specific item out of 4 fake items, confirmed all 4 were still attempted
+against the pre-fix vs. post-fix loop body) rather than just trusting
+the diff. Ran the full test suite: 129 tests, all green (no existing
+test covered this failure-isolation behavior before, hence the separate
+live reproduction above rather than relying on the suite alone).
+
+Also, per user request, backed up (renamed, not deleted)
+`output/tracker.db` and `output/x_accounts_state.json` to
+`.bak-<timestamp>` files so the user can run a genuinely from-scratch
+week on their own machine and compare against the coworker's result —
+the next run will auto-reseed from the committed past-tracker docs
+(which only extend to late June 2026, confirmed earlier, so this can't
+suppress anything in Aug 25-31) via the existing first-run check in
+`scripts/run_week.sh`.
