@@ -4739,3 +4739,136 @@ coworker's genuine first-time install need every shallow-list source
 the same real pagination SCIO/MND now have? That's a bigger, multi-
 source change, not a quick fix — worth a deliberate go/no-go rather
 than doing it reflexively under time pressure.
+
+2026-09-04 continued — per direct user request ("how long do I have
+before article goes to second page? look into pagination for all
+sources"), audited every source's real, live list depth instead of
+guessing. Results (checked live, not estimated):
+
+- **fmprc_conf**: ~7-8 days of buffer (7 items on its one list page,
+  span Aug27-Sep4). The shallowest source found. Tried the obvious
+  `lxjzh_2.html`/`_3.html` guess (mirroring SCIO's numbered-suffix
+  pagination) — both return HTTP 200 but are a "系统维护" (system
+  maintenance) placeholder page, not real content. No working deeper
+  archive found via this endpoint in the time available; would need
+  real inspection of the live site's actual "older" mechanism (if one
+  exists at all) to go further back.
+- **fmprc_remarks**: ~71 days (7 items, Jun5-Aug15) — moderate.
+- **treasury**: ~10 days (9 items, Aug24-Sep3) on its default listing.
+  Its HTML DOES advertise `?page=2`/`?page=3` links, but tested live —
+  `?page=0` through `?page=5` all return byte-identical results. Most
+  likely an edge/CDN cache keying on the path and ignoring the query
+  string, not a code-level pagination bug — would need a cache-busting
+  approach or a different endpoint to actually reach page 2.
+- **state**: ~2 days only (its WP-JSON API returned just 10 items
+  despite requesting `per_page=50`, spanning Sep3-4). Same `?page=N`
+  ignored-parameter symptom as treasury, live-confirmed identical
+  responses for page=1/2/3 — the shallowest AND least fixable-by-query-
+  param source found today.
+- **ustr**: no issue — its listing page loads the full archive
+  (345 items back to 2022) in one page, not really "paginated" at all.
+- **whitehouse**: ~14 days (RSS feed, 30 items, Aug21-Sep4) — moderate,
+  RSS feeds are inherently shallow by design and don't have a "page 2"
+  to reach for.
+- **mfa_leadership (speeches)**: NOT shallow — corrected an earlier
+  wrong assumption in this same file (an earlier entry today guessed
+  this "looks similarly shallow" without checking; it doesn't). One
+  page carries 42 items back to Oct/Nov 2025, ~300+ days.
+- **mofcom** (base press-conference endpoint): depth unconfirmed — its
+  URLs are opaque hashes with no embedded date, and the CMS API was
+  intermittently 500ing/connection-resetting during today's checks
+  (a known, pre-existing flakiness, see earlier NOTES entries); would
+  need per-item fetches to know real dates, not done today.
+- **scio**: already has real, working, verified multi-page pagination
+  (2026-09-03) — not re-audited today, no reason to expect regression.
+- **mnd**: fixed today (see entry above) — real depth across both
+  lists reaches back to ~Nov 2025 once merged and sorted correctly, no
+  further work needed there.
+
+**Conclusion on "pagination for all sources": genuinely NOT a uniform
+fix.** SCIO/MND's pattern (numbered/paginated URLs, fetch until past
+the target date) only helps where a site actually has a WORKING deeper
+list AND the naive next-page guess is right. Today's checks found real
+resistance to a quick fix for the 3 most urgent sources specifically:
+FMPRC's guessed pagination URL is a dead page, and Treasury/State's
+`?page=N` parameter appears to be silently ignored by (most likely) a
+caching layer in front of the real site, not by the underlying
+application — meaning naively adding a page-increment loop to those
+three would not actually work, confirmed live rather than assumed.
+Real fixes for these three need more investigation than fit in this
+pass (e.g., checking whether a different real endpoint/API exists,
+whether a cache-busting header/param helps, or whether the site has an
+actual date-range search feature) — NOT implemented today, flagged
+honestly rather than shipped half-verified.
+
+Implemented `_atomic_doc_save()` per direct user request ("save
+progress along the way... so if crash then progress still saved. have
+you implemented [this]? if not implement"). The per-source flush/
+mark_seen/DB-commit ordering (see flush_pending_entries()'s own
+docstring, 2026-09-01) already guaranteed no entry is lost OR double-
+counted if the process dies between sources — that part existed
+already. What was missing: `doc.save(path)` itself writes straight to
+the target file, so a kill DURING that specific write (not between
+sources, but the literal moment of writing) could leave a truncated/
+corrupted .docx — a real risk for DOC_PATH specifically, since it's
+saved after every single source, all run, every run. Fixed with the
+standard write-to-temp-then-atomic-rename pattern (`os.replace`, atomic
+on POSIX and Windows). Verified live both ways: a real successful save
+leaves no temp file behind, and a save that raises mid-write leaves the
+ORIGINAL file byte-for-byte untouched with no orphaned temp file
+either. Added 2 regression tests. Applied to both save sites — the
+per-source master doc (`DOC_PATH`) and the once-per-run dated weekly
+doc.
+
+Also wiped Sep 1-4 specifically (the 15 entries this session's normal
+incremental use had already found, restored DB, backed up first as
+`tracker.db.bak-before-sep1-4-wipe-<timestamp>`) and re-ran it fresh,
+to measure how much a from-scratch discovery loses for a week that is
+almost entirely still "on the front page" (unlike Aug 25-31, which had
+already scrolled well past it) — see the next entry for the result.
+
+**Result: even a same-day rediscovery already lost real content.** Of
+the 15 original entries, the fresh re-run found 13 — but they weren't
+the SAME 13. It correctly rediscovered 11, gained 2 brand-new real MND
+entries (a direct, concrete win from today's MND ordering fix — those
+2 were never findable before), and lost 4 entirely:
+
+- `whitehouse` ×2 (the G20 ministerial release, the Venezuela oil-deal
+  fact sheet)
+- `state` ×1 (the Rubio/Kilmeade interview from earlier this session)
+- `treasury` ×1 (sb0620)
+
+Checked why, live: `state`'s WP-JSON API — even asked for `per_page=50`
+— currently returns only 10 items spanning Sep 3-4. Sep 2's Rubio
+interview has ALREADY scrolled out of reach, 2 days later. That's the
+real, measured answer to "how long do I have" for state.gov: as little
+as 1-2 days, not weeks, on a currently-busy stretch. Whitehouse and
+Treasury show the same pattern on a similar timescale — their listing
+pages are small and newer content keeps pushing recent-but-not-newest
+items off the visible window within days, not weeks.
+
+This is the sharpest possible illustration of today's root cause: it
+isn't about how OLD a week is in absolute terms, it's about how much
+has been published on that specific source SINCE. A quiet source can
+stay reachable for months (MFA leadership: ~300 days); a busy one can
+lose content within 48 hours (state.gov, apparently, right now).
+
+Left the run's own regression uncorrected would have been worse than
+not testing at all — a live re-run costs real discoverability, it
+doesn't just measure it. Merged the 4 lost entries back in from the
+pre-wipe backup (`tracker.db.bak-before-sep1-4-wipe-<timestamp>`)
+immediately after confirming this, restoring both `entries` and
+`seen_urls` for them, so nothing this session already had is actually
+gone. Final state: 17 entries for Sep 1-4 (15 original + 2 new MND
+finds), re-rendered `US-China Tracker Sep 1-4, 2026.docx` to match. Ran
+the full suite once more after all of today's changes: 134 tests, all
+green.
+
+Bottom line for whoever reads this next: state.gov, treasury, and
+whitehouse are now the demonstrated-urgent cases (day-scale windows,
+not week-scale), ahead of fmprc_conf (week-scale) — and all three hit
+the same `?page=N`-appears-ignored wall found earlier today, so fixing
+them for real needs actual investigation (a different real endpoint, a
+cache-busting approach, or confirming there's genuinely no deeper
+archive available), not a mechanical copy of SCIO/MND's fix. Not done
+this session — a deliberate, scoped follow-up, not an oversight.

@@ -37,6 +37,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from contextlib import contextmanager
@@ -2053,6 +2054,40 @@ def queue_entry(
     })
 
 
+def _atomic_doc_save(doc: Document, path: str) -> None:
+    """
+    Save `doc` without ever leaving `path` in a half-written state.
+    `Document.save()` writes straight to the target file — if the process
+    is killed (crash, force-quit, power loss) partway through, `path` can
+    be left as a truncated/corrupted .docx. This is a real risk
+    specifically for DOC_PATH (the master tracker_output.docx): it's
+    saved after EVERY source, all run, forever, so it has far more
+    chances to land on an unlucky kill than any single week's dated copy.
+    Standard fix: write to a temp file in the SAME directory (so the
+    final swap stays on one filesystem, required for os.replace to be
+    atomic), then atomically swap it into place. A kill mid-write now
+    leaves either the untouched old `path` or a harmless orphaned temp
+    file — never a corrupted `path`. Added 2026-09-04 per user request
+    ("save progress along the way... so if crash then progress still
+    saved") — the per-source flush/mark_seen/commit ordering already
+    guarantees no entry is lost or double-counted on a crash (see this
+    function's own docstring above); this closes the one remaining gap,
+    the write itself not being crash-safe.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".docx.tmp")
+    os.close(fd)
+    try:
+        doc.save(tmp_path)
+        os.replace(tmp_path, path)  # atomic on POSIX and Windows alike
+    except Exception:
+        # Don't leave a stray temp file behind on failure — but the
+        # failure itself (whatever it was) still propagates to the caller.
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
 def flush_pending_entries(doc: Document, conn: sqlite3.Connection) -> int:
     """Sort pending entries by date, write them with one heading per date
     (collapsing repeats against the last date written by a PREVIOUS flush
@@ -2093,7 +2128,7 @@ def flush_pending_entries(doc: Document, conn: sqlite3.Connection) -> int:
                 add_release_entry_body(doc, e["summary"], e["paragraphs"], e["url"], e["anchor"],
                                         source_label=e.get("source_label"))
 
-        doc.save(DOC_PATH)
+        _atomic_doc_save(doc, DOC_PATH)
         for e in ordered:
             if e["url"]:
                 mark_seen(conn, e["url"])
@@ -5472,7 +5507,7 @@ def main() -> None:
     week_doc = render_doc_for_range(conn, week_start, week_end)
     dated_name = f"US-China Tracker {week_label}.docx"
     dated_path = os.path.join(DATA_DIR, dated_name)
-    week_doc.save(dated_path)
+    _atomic_doc_save(week_doc, dated_path)
 
     elapsed = _format_duration(time.monotonic() - run_start_monotonic)
     llm_tokens, x_reads, run_usd = _summarize_run_usage(run_start_ts)
