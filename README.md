@@ -50,6 +50,18 @@ python code/seed_dedup_db.py
 This tells the tool about everything already covered in the past
 tracker documents, so it won't repeat old news the first time it runs.
 
+**Step 6 (optional, but recommended).** Type this and press Enter:
+
+```
+python code/scraper.py --check
+```
+
+This confirms your `.env` key actually works, in a few seconds, before
+you commit to a real run that takes 10-15 minutes and costs real money.
+If it says your setup looks good, you're ready. If something's wrong,
+it'll tell you specifically what (a missing key, a rate limit, etc.)
+instead of you finding out partway through a real run.
+
 Setup is done. You won't need to repeat any of this again.
 
 ## Running it each week
@@ -119,9 +131,17 @@ one of the websites it checks happened to be down that day:
 ```
 1 source(s) had errors this run:
   - State Council Information Office: 2 error(s)
+      [scio] Failed to fetch list (likely cause: the website took too long to respond)
 ```
 
-If everything worked, it just says `No source errors this run.`
+Each error line includes a plain-language guess at what actually
+happened (a rate limit, a dead page, a network problem), not just the
+raw technical detail. If everything worked, it just says `No source
+errors this run.`
+
+If a run's cost ever unexpectedly runs away (a real bug, not normal
+behavior), it stops itself automatically once spending crosses $5 and
+tells you so — everything found up to that point is still saved.
 
 Every run also ends with a reminder that Truth Social, YouTube, and the
 Dept of War website are not covered by this tool at all (see below for

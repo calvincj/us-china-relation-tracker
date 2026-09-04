@@ -1520,5 +1520,61 @@ class TestScrapeXGroupIsolation(unittest.TestCase):
         self.assertEqual(len(calls), 2, "the second group should still have been attempted")
 
 
+class TestMofcomLxxwfbhDateFallback(unittest.TestCase):
+    """
+    _MOFCOM_LXXWFBH_DATE_RE / _MOFCOM_LXXWFBH_TITLE_DATE_RE — a real bug
+    caught live, 2026-09-04, DURING a validation run of the same day's
+    pagination fix: 2023/2024 archive URLs use slug shapes the main
+    regex doesn't match ("...2024n4y25" — no trailing "r";
+    "...2023n2y169r" — not a real month/day), and the original fallback
+    for an unparseable date was _utcnow().date() (today) — which made a
+    genuinely years-old item sort as the NEWEST possible item, so the
+    "stop once older than target start" check never fired. The live run
+    translated real 2023/2024 content before being caught and killed.
+    This mirrors the exact date-fallback pattern documented in
+    scrape_mofcom_lxxwfbh() itself, not tested against the LIVE site
+    here (that's what the docstring's real URLs are for) — this locks
+    in the parsing/fallback LOGIC in isolation.
+    """
+
+    def _resolve(self, href: str, title: str):
+        m = S._MOFCOM_LXXWFBH_DATE_RE.search(href)
+        if m:
+            return S.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        m2 = S._MOFCOM_LXXWFBH_TITLE_DATE_RE.search(title)
+        if m2:
+            return S.date(int(m2.group(1)), int(m2.group(2)), int(m2.group(3)))
+        return S.date.min
+
+    def test_well_formed_url_uses_the_url_date(self):
+        d = self._resolve(
+            "https://www.mofcom.gov.cn/xwfbzt/2026/swbzklxxwfbh2026n9y3r/index.html",
+            "商务部召开例行新闻发布会（2026年9月3日）",
+        )
+        self.assertEqual(d, S.date(2026, 9, 3))
+
+    def test_url_missing_trailing_r_falls_back_to_title(self):
+        d = self._resolve(
+            "https://www.mofcom.gov.cn/xwfbzt/2024/swbzklxxwfbh2024n4y25/index.html",
+            "商务部召开例行新闻发布会（2024年4月25日）",
+        )
+        self.assertEqual(d, S.date(2024, 4, 25))
+
+    def test_malformed_url_slug_falls_back_to_title(self):
+        d = self._resolve(
+            "https://www.mofcom.gov.cn/xwfbzt/2023/swbzklxxwfbh2023n2y169r/index.html",
+            "商务部召开例行新闻发布会（2023年2月16日）",
+        )
+        self.assertEqual(d, S.date(2023, 2, 16))
+
+    def test_genuinely_unparseable_falls_back_to_date_min_not_today(self):
+        # The actual bug: this must NOT be _utcnow().date() (today), or
+        # a years-old item looks newer than everything real and the
+        # early-stop that depends on sort order never fires.
+        d = self._resolve("https://example.com/no-date-here/index.html", "no date info at all")
+        self.assertEqual(d, S.date.min)
+        self.assertNotEqual(d, S._utcnow().date())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

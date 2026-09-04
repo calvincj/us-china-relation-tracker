@@ -4001,6 +4001,15 @@ def scrape_mofcom_special_conf(model: genai.Client, conn: sqlite3.Connection, do
 # run's target start instead of relying on MAX_NEW_ITEMS_PER_RUN alone.
 _MOFCOM_LXXWFBH_LINK_RE = re.compile(r"/xwfbzt/\d{4}/swbzklxxwfbh[^/]+/index\.html$")
 _MOFCOM_LXXWFBH_DATE_RE = re.compile(r"swbzklxxwfbh(\d{4})n(\d{1,2})y(\d{1,2})r")
+# Fallback for older archive years — found live, 2026-09-04, running a
+# real validation of today's pagination fix: 2023/2024 URLs use
+# inconsistent slug shapes the main regex above doesn't match at all
+# ("...2024n4y25/" — no trailing "r"; "...2023n2y169r" — clearly not
+# month/day). The title text, in contrast, consistently spells the real
+# date out in Chinese regardless of year or URL quirks, e.g.
+# "商务部召开例行新闻发布会（2026年9月3日）" — used as a second attempt
+# before falling back further (see the real bug this fixed, below).
+_MOFCOM_LXXWFBH_TITLE_DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
 
 
 def scrape_mofcom_lxxwfbh(model: genai.Client, conn: sqlite3.Connection, doc: Document) -> None:
@@ -4021,14 +4030,42 @@ def scrape_mofcom_lxxwfbh(model: genai.Client, conn: sqlite3.Connection, doc: Do
         tag, list_url, api_query, _MOFCOM_LXXWFBH_LINK_RE, client,
         skip_index_hrefs=False,
     )
+    # This section's list widget has NO trailing date <span> at all (unlike
+    # ldrhd/rcxwfb/etc.) — confirmed live the same day this was found to
+    # matter — so _paginate_mofcom_cms_list's own coarse early-stop can
+    # never fire here; it always walks all _MOFCOM_PAGE_LIMIT pages. That
+    # makes the per-item date-parsing below the ONLY thing standing between
+    # a normal run and translating years of irrelevant archive content, so
+    # it has to actually be reliable, not just usually right.
 
     dated_items: list[tuple[date, str, str]] = []
     for href, title in raw_links:
         m = _MOFCOM_LXXWFBH_DATE_RE.search(href)
-        item_date = (
-            date(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m
-            else _utcnow().date()
-        )
+        if m:
+            item_date = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        else:
+            m2 = _MOFCOM_LXXWFBH_TITLE_DATE_RE.search(title)
+            if m2:
+                item_date = date(int(m2.group(1)), int(m2.group(2)), int(m2.group(3)))
+            else:
+                # Genuinely can't tell — found live, 2026-09-04: the
+                # ORIGINAL version of this code defaulted to
+                # _utcnow().date() here (today), which is actively
+                # dangerous for an early-stop check: an item that's
+                # actually years old looked like the NEWEST possible
+                # item, so it always sorted first and the "stop once
+                # older than target start" check below never fired at
+                # all. That one real bug let a live validation run
+                # translate real 2023/2024 archive content while
+                # targeting Aug 2026, burning real, unnecessary cost
+                # before being caught and killed. date.min sorts as the
+                # OLDEST possible item instead — the safe direction to
+                # be wrong in, since it gets correctly excluded/stopped-
+                # at rather than wrongly treated as current.
+                log.warning(f"[{tag}] Could not parse a date from URL or title, "
+                            f"treating as very old (safer than treating as "
+                            f"current): {href}")
+                item_date = date.min
         dated_items.append((item_date, href, title))
     dated_items.sort(key=lambda t: t[0], reverse=True)  # newest first, defensively
 
