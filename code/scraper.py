@@ -39,6 +39,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urljoin
@@ -3434,6 +3435,33 @@ def item_date(item: dict) -> datetime:
         return _utcnow()
 
 
+@contextmanager
+def _isolate_item_errors(tag: str, item_id: object):
+    """
+    Wrap ONE item's processing so a failure there is logged and skipped
+    instead of aborting every remaining item in the same source. Added
+    2026-09-04 after finding that 9 of 11 source loops had no per-item
+    protection at all (only state/whitehouse hand-rolled a try/except) —
+    a single unhandled exception (a 429 with no fallback configured, a
+    transient error, anything) silently killed the rest of that source's
+    list for the whole run, with nothing more visible than one
+    "[key] Unhandled error" line. See NOTES.md for the real case this was
+    found from (a coworker's ~20-minute, real-money run producing exactly
+    one entry).
+
+    Centralized here rather than hand-copied at each of the 11 call sites
+    on purpose — that's exactly how 9 of them ended up unprotected the
+    first time: someone wrote the safety net once for state/whitehouse and
+    every source added afterward just... didn't copy it forward. A new
+    source using this gets the protection automatically instead of
+    depending on whoever writes it remembering to.
+    """
+    try:
+        yield
+    except Exception as exc:
+        log.error(f"[{tag}] Error on {item_id}: {exc}")
+
+
 # ── Source: FMPRC ─────────────────────────────────────────────────────────────
 
 def process_fmprc_item(
@@ -3524,10 +3552,8 @@ def scrape_fmprc(
     log.info(f"[fmprc/{label}] {len(new_links)} new items")
 
     for url, title in new_links:
-        try:
+        with _isolate_item_errors(f"fmprc/{label}", url):
             process_fmprc_item(url, title, label, model, conn, client)
-        except Exception as exc:
-            log.error(f"[fmprc/{label}] Error on {url}: {exc}")
 
 
 # ── Source: MOFCOM ────────────────────────────────────────────────────────────
@@ -3615,10 +3641,8 @@ def scrape_mofcom(
     log.info(f"[mofcom] {len(new_links)} new items")
 
     for url, title in new_links:
-        try:
+        with _isolate_item_errors("mofcom", url):
             process_mofcom_item(url, title, model, conn, client)
-        except Exception as exc:
-            log.error(f"[mofcom] Error on {url}: {exc}")
 
 
 # All of MOFCOM's Chinese-language xwfb/* index pages run the identical JS
@@ -3674,10 +3698,8 @@ def scrape_mofcom_section(
     log.info(f"[{tag}] {len(new_links)} new items")
 
     for url, title in new_links:
-        try:
+        with _isolate_item_errors(tag, url):
             process_mofcom_item(url, title, model, conn, client)
-        except Exception as exc:
-            log.error(f"[{tag}] Error on {url}: {exc}")
 
 
 def scrape_mofcom_daily(model: genai.Client, conn: sqlite3.Connection, doc: Document) -> None:
@@ -3757,10 +3779,8 @@ def scrape_mofcom_lxxwfbh(model: genai.Client, conn: sqlite3.Connection, doc: Do
     log.info(f"[{tag}] {len(new_items)} new items")
 
     for url, title, item_date in new_items:
-        try:
+        with _isolate_item_errors(tag, url):
             process_mofcom_item(url, title, model, conn, client, known_date=item_date)
-        except Exception as exc:
-            log.error(f"[{tag}] Error on {url}: {exc}")
 
 
 def process_mofcom_item(
@@ -3924,14 +3944,11 @@ def scrape_state(
 
     for it in new_items:
         url = item_url(it)
-        try:
+        with _isolate_item_errors("state", url):
             title = item_title(it)
             plain = BeautifulSoup(item_content(it), "html.parser").get_text()
             process_release_common("state", url, title, item_date(it), plain,
                                     "State Department", model, conn)
-
-        except Exception as exc:
-            log.error(f"[state] Error on {url}: {exc}")
 
 
 def _resolve_pdf_stub(
@@ -4009,16 +4026,13 @@ def scrape_whitehouse(
 
     for it in new_items:
         url = item_url(it)
-        try:
+        with _isolate_item_errors("whitehouse", url):
             title = item_title(it)
             raw_content = item_content(it)
             plain = BeautifulSoup(raw_content, "html.parser").get_text()
             plain = _resolve_pdf_stub(client, raw_content, plain, url)
             process_release_common("whitehouse", url, title, item_date(it), plain,
                                     "White House", model, conn)
-
-        except Exception as exc:
-            log.error(f"[whitehouse] Error on {url}: {exc}")
 
 
 # ── Source: Treasury ──────────────────────────────────────────────────────────
@@ -4080,10 +4094,8 @@ def scrape_treasury(
     log.info(f"[treasury] {len(new_links)} new items")
 
     for url, title, item_date in new_links:
-        try:
+        with _isolate_item_errors("treasury", url):
             process_treasury_item(url, title, model, conn, client, known_date=item_date)
-        except Exception as exc:
-            log.error(f"[treasury] Error on {url}: {exc}")
 
 
 def process_treasury_item(
@@ -4177,10 +4189,8 @@ def scrape_ustr(
     log.info(f"[ustr] {len(new_links)} new items")
 
     for url, title, item_date in new_links:
-        try:
+        with _isolate_item_errors("ustr", url):
             process_ustr_item(url, title, model, conn, client, known_date=item_date)
-        except Exception as exc:
-            log.error(f"[ustr] Error on {url}: {exc}")
 
 
 def process_ustr_item(
@@ -4381,10 +4391,8 @@ def scrape_mfa_leadership(
     log.info(f"[mfa_leadership/{label}] {len(new_links)} new items")
 
     for url, title in new_links:
-        try:
+        with _isolate_item_errors(f"mfa_leadership/{label}", url):
             process_mfa_leadership_item(url, title, label, model, conn, client)
-        except Exception as exc:
-            log.error(f"[mfa_leadership/{label}] Error on {url}: {exc}")
 
 
 def process_mfa_leadership_item(
@@ -4565,10 +4573,8 @@ def scrape_scio(
     log.info(f"[scio] {len(new_items)} new items")
 
     for url, title, item_date in new_items:
-        try:
+        with _isolate_item_errors("scio", url):
             process_scio_item(url, title, model, conn, client, known_date=item_date)
-        except Exception as exc:
-            log.error(f"[scio] Error on {url}: {exc}")
 
 
 def process_scio_item(
@@ -4657,7 +4663,27 @@ def scrape_mnd(
     ]
     client = make_client(verify_ssl=False)  # mod.gov.cn cert untrusted by Python CA bundle
 
-    raw_links: list[tuple[str, str]] = []
+    # Sort the TWO lists together by date before ever slicing to
+    # MAX_NEW_ITEMS_PER_RUN — found live, 2026-09-04, on a freshly-seeded
+    # database: raw_links used to just be list_urls[0]'s items followed by
+    # list_urls[1]'s items, then sliced. yzxwfb (list_urls[0]) alone
+    # regularly has 30+ items on its own (it goes back to July), so the
+    # cap was being fully consumed by list_urls[0] BEFORE lxjzh_246940
+    # (list_urls[1] — the one that actually carries the weekly Q&A
+    # transcripts) was ever looked at, regardless of what it contained.
+    # Confirmed live: a real week (Aug 25-31) had its actual MND content
+    # sitting in list_urls[1], never fetched at all because list_urls[0]'s
+    # unrelated July/August backlog had already used up every slot.
+    # Sorting the merged list by each item's own date first, THEN
+    # slicing, makes the cap apply to "the 30 newest items across both
+    # lists" instead of "list_urls[0] in full, then whatever's left over
+    # for list_urls[1]." Each item's date comes from the date/time MND
+    # itself appends to the link text (e.g. "...2026-09-04 15:41") — no
+    # extra fetch needed to know it, same trick as MFA leadership's/SCIO's
+    # URL-embedded dates.
+    _MND_TITLE_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})\s*\d{1,2}:\d{2}\s*$")
+
+    raw_items: list[tuple[date, str, str]] = []
     for list_url in list_urls:
         log.info(f"[mnd] {list_url}")
         resp = fetch(client, list_url)
@@ -4668,17 +4694,22 @@ def scrape_mnd(
         for a in soup.find_all("a", href=_MND_LINK_RE):
             href  = urljoin(list_url, a["href"])
             title = a.get_text(strip=True)
-            if title:
-                raw_links.append((href, title))
+            if not title:
+                continue
+            m = _MND_TITLE_DATE_RE.search(title)
+            item_date = (
+                date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                if m else _utcnow().date()
+            )
+            raw_items.append((item_date, href, title))
 
-    new_links = [(u, t) for u, t in raw_links if not is_seen(conn, u)][:MAX_NEW_ITEMS_PER_RUN]
+    raw_items.sort(key=lambda t: t[0], reverse=True)  # newest first, across BOTH lists
+    new_links = [(u, t) for _, u, t in raw_items if not is_seen(conn, u)][:MAX_NEW_ITEMS_PER_RUN]
     log.info(f"[mnd] {len(new_links)} new items")
 
     for url, title in new_links:
-        try:
+        with _isolate_item_errors("mnd", url):
             process_mnd_item(url, title, model, conn, client)
-        except Exception as exc:
-            log.error(f"[mnd] Error on {url}: {exc}")
 
 
 def process_mnd_item(
@@ -5071,10 +5102,8 @@ def scrape_x(model: genai.Client, conn: sqlite3.Connection, doc: Document) -> No
         log.info(f"[x/{group_key}] {len(tweets)} new matching tweets since last run")
 
         for tweet in tweets:
-            try:
+            with _isolate_item_errors(f"x/{group_key}", f"tweet {tweet.get('id', '?')}"):
                 process_x_tweet(tweet.get("username", "?"), tweet, model, conn)
-            except Exception as exc:
-                log.error(f"[x/{group_key}] Error on tweet {tweet.get('id', '?')}: {exc}")
 
         # Explicit max(), not tweets[0] — search results are typically
         # newest-first but that's not a documented guarantee the way it
@@ -5139,6 +5168,88 @@ def _parse_user_date(s: str) -> date:
     if re.fullmatch(r"\d{8}", s):
         return datetime.strptime(s, "%Y%m%d").date()
     return date.fromisoformat(s)
+
+
+def run_setup_check() -> bool:
+    """
+    `--check`: a fast (one tiny real API call), effectively-free sanity
+    check for a fresh setup — added 2026-09-04 after a real debugging
+    session (see NOTES.md) that a check like this would have shortcut
+    entirely: a coworker's ~20-minute, real-money run produced almost
+    nothing, and there was no fast way to isolate "is my Gemini key/tier
+    even working" from "is something wrong further down the pipeline"
+    before spending the full run to find out. Touches no database, no
+    output files, no scraping — just confirms the one REQUIRED credential
+    actually works with the exact model/config the real pipeline uses,
+    and reports which OPTIONAL fallback keys are present (without
+    spending anything on them — presence isn't proof they work, but it's
+    a free, useful signal, and actually calling every optional provider
+    on every check would cost real money for something almost never
+    exercised in a normal run).
+
+    Returns True if the required Gemini check passed, False otherwise —
+    main() turns that into an exit code so this can be scripted.
+    """
+    print("Checking your setup...\n")
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("✗ GEMINI_API_KEY is not set in your .env file — this is required, "
+              "the tool cannot run at all without it.")
+        return False
+
+    print(f"Testing Gemini ({GEMINI_MODEL})...")
+    try:
+        model = init_llm()
+        t0 = time.monotonic()
+        resp = model.models.generate_content(
+            model=GEMINI_MODEL,
+            contents="Reply with exactly one word: OK",
+            config=types.GenerateContentConfig(thinking_config=_GEMINI_THINKING_CONFIG),
+        )
+        elapsed = time.monotonic() - t0
+        usage = getattr(resp, "usage_metadata", None)
+        usd = 0.0
+        if usage is not None:
+            usd = _estimate_usd(
+                "Gemini",
+                getattr(usage, "prompt_token_count", 0),
+                getattr(usage, "candidates_token_count", 0),
+                getattr(usage, "thoughts_token_count", 0),
+            ) or 0.0
+        print(f"✓ Gemini responded in {elapsed:.1f}s (\"{resp.text.strip()}\") "
+              f"— your key and the current model both work.")
+        print(f"  Cost of this test call: ~${usd:.5f} (negligible).")
+    except Exception as exc:
+        err = str(exc).lower()
+        print(f"✗ Gemini call failed: {exc}")
+        if "404" in err or "not found" in err:
+            print("  This looks like the model name is out of date or unavailable for "
+                  "your account — GEMINI_MODEL in code/scraper.py may need updating to "
+                  "a currently-available model (see NOTES.md for the last time this "
+                  "happened).")
+        elif "429" in err or "quota" in err or "resource_exhausted" in err:
+            print("  This looks like a rate limit or quota problem, not a code bug — "
+                  "check whether your Gemini API key's Google Cloud project actually "
+                  "has billing LINKED (not just a billing account existing somewhere "
+                  "on your Google account) at https://aistudio.google.com.")
+        return False
+
+    print("\nOptional fallback keys (only used if Gemini gets rate-limited):")
+    for name, env_var in [
+        ("X/Twitter",  "X_API_KEY"),
+        ("Groq",       "GROQ_API_KEY"),
+        ("OpenRouter", "OPENROUTER_API_KEY"),
+        ("Grok/xAI",   "GROK_API_KEY"),
+    ]:
+        present = bool(os.environ.get(env_var))
+        mark = "✓ set    " if present else "  not set"
+        print(f"  {mark} — {name}")
+    print("  (presence only — these aren't test-called here, to avoid spending "
+          "real money on providers a normal run almost never touches.)")
+
+    print("\nSetup looks good — safe to run a real week.")
+    return True
 
 
 def default_week_range(today: date | None = None) -> tuple[date, date]:
@@ -5211,7 +5322,17 @@ def main() -> None:
              f"week's new content per source is small; raising it here "
              f"doesn't change what a future normal run costs.",
     )
+    parser.add_argument(
+        "--check", action="store_true",
+        help="Quick sanity check for a fresh setup: confirm your .env keys "
+             "actually work with one tiny, effectively-free Gemini call, "
+             "before committing to a full (paid, ~15-20 minute) week. "
+             "Doesn't scrape or write anything. Exits 0 if the check "
+             "passes, 1 if it doesn't.",
+    )
     args = parser.parse_args()
+    if args.check:
+        sys.exit(0 if run_setup_check() else 1)
     if args.verbose:
         _console_handler.setLevel(logging.INFO)
     if args.max_items is not None:

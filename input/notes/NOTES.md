@@ -4588,3 +4588,154 @@ the next run will auto-reseed from the committed past-tracker docs
 (which only extend to late June 2026, confirmed earlier, so this can't
 suppress anything in Aug 25-31) via the existing first-run check in
 `scripts/run_week.sh`.
+
+2026-09-04 continued — CORRECTION to the per-item error-isolation entry
+above, found while doing a broader reflect-on-good-practices pass at
+user request. That entry claimed "9 of 11 loops had no per-item
+protection." That was WRONG — it was based on checking only the OUTER
+loop in each `scrape_*` function, without checking whether the inner
+`process_*_item` function it calls already had its own try/except.
+Checked properly this time (every function body, not just its call
+site): `process_fmprc_item`, `process_mofcom_item`,
+`process_treasury_item`, `process_ustr_item`, `process_wardept_item`,
+`process_scio_item`, `process_mnd_item`, and `process_mfa_leadership_
+item` ALL already wrapped their entire body in try/except and returned
+False on failure — a real, effective per-item boundary, just one layer
+down from where the earlier check looked, not something my Tuesday-
+morning fix (the loop-level try/except added to those same 9 loops) was
+actually needed for. The ONE genuine gap was `process_x_tweet`, which
+had zero internal error handling — a real, previously-unprotected
+exception path.
+
+Correcting the record rather than leaving the overstated version
+standing: this means the "one Gemini failure silently killed the rest
+of the coworker's run" theory is weaker than it looked — 8 of those 9
+sources would have caught a failure, logged it, and kept going item by
+item, not died silently. Whatever actually caused her near-empty result
+is more likely her own local code change, or something upstream of
+these functions entirely (the list-fetch/dedup step), than this
+specific mechanism. Left as an open question — her actual run log/error
+section, not seen by this session, would settle it.
+
+Kept the fix anyway, refactored into one shared `_isolate_item_errors()`
+context manager (used at all 10 active loops — fmprc, mofcom x3,
+treasury, ustr, mfa_leadership, scio, mnd, state, whitehouse, and the X
+tweet loop; `wardept` deliberately left alone, it's disabled dead code
+with its own special stop-on-403 logic) rather than reverting it,
+for two real reasons even though most of it is redundant with the inner
+try/except today: (1) it's the one actual fix `process_x_tweet` needed,
+and (2) centralizing it in ONE place instead of the previous
+inconsistent mix (8 sources doing it inside the function, 2 doing it in
+the loop, 1 doing it nowhere) means a brand new source added later
+gets this protection automatically instead of depending on whoever
+writes it remembering to copy the pattern correctly — which is likely
+how the X gap happened in the first place. Added 3 real unit tests for
+the shared helper (`TestIsolateItemErrors` in test_scraper.py),
+including one that directly reproduces the regression this exists to
+prevent: an item raising must not stop the following items in the same
+loop from being attempted.
+
+Also added `--check`: a new CLI flag that makes exactly ONE tiny,
+effectively-free Gemini call (same model/thinking config the real
+pipeline uses) to confirm a fresh `.env`'s required GEMINI_API_KEY
+actually works, plus reports which optional fallback keys are present,
+all before committing to a real ~15-20 minute, real-money run. Directly
+motivated by this week's actual events: if this had existed already,
+the coworker's whole situation could have been triaged in about 2
+seconds instead of an extended debugging conversation across several
+turns. On failure, gives a specific, actionable message rather than a
+raw traceback: distinguishes a 404 ("model name is out of date") from a
+429/quota error ("check whether billing is actually LINKED to your
+key's project, not just existing somewhere on your account") using the
+same real distinction this session already worked through by hand.
+Touches no database, no output files, no scraping — verified live both
+ways: a real successful run against the actual Gemini key (responded in
+1.8s, ~$0.00033, all 4 optional keys correctly reported as set) and a
+real failure run with GEMINI_API_KEY removed (clear message, exit code
+1, no traceback).
+
+Compiled and ran the full suite after all of the above: 132 tests
+(129 + 3 new), all green.
+
+2026-09-04 continued — MAJOR finding, the real explanation for the
+coworker's near-empty run. User ran a real, live full week against the
+freshly-wiped database from earlier today (same Aug 25-31 week) and got
+a similarly sparse result — ruling out the coworker's own local code
+change as the cause, since the exact same code/model on a different
+machine reproduced it. Investigated live rather than theorizing:
+
+Compared entry counts directly: the OLD database (this session's
+accumulated, hand-verified state, backed up before the wipe) had 16 real
+entries for Aug 25-31. The fresh run just now produced only 5. FMPRC
+(4 entries in the old DB) and SCIO (3 entries) both went to ZERO.
+
+Root cause, confirmed two different ways for two different sources:
+
+1. **`scrape_mnd`** (Ministry of National Defense) concatenated its TWO
+   list pages (`yzxwfb`, `lxjzh_246940`) into one array, THEN sliced to
+   `MAX_NEW_ITEMS_PER_RUN` (30). `yzxwfb` alone already has 30+ items
+   going back to July, so on a database with nothing marked seen yet,
+   the cap was entirely consumed by `yzxwfb` before `lxjzh_246940` —
+   the list that actually carries the real weekly Q&A transcripts,
+   confirmed to have Aug 27-28 content sitting right at its top — was
+   EVER fetched at all. Fixed by extracting each item's date from the
+   date/time MND appends to its own link text, merging both lists, and
+   sorting by that date BEFORE slicing to the cap — mirrors the
+   date-aware-pagination fix SCIO already got 2026-09-03 for the same
+   underlying problem shape. Verified live: the 5 items in that Aug
+   27-28 cluster were individually confirmed as either genuinely not
+   US-relevant (Philippines/Japan/Belarus/domestic-recruitment topics)
+   or — one real near-miss worth a future look — using PRC diplomatic
+   euphemism ("外部势力"/"external forces") to reference the US instead
+   of naming it, which the explicit-US-mention filter doesn't catch;
+   not fixed today, flagged for later.
+
+2. **The bigger one, affecting FMPRC and likely others**: `scrape_fmprc`
+   fetches ONLY the single current list page for
+   `.../eng/xw/fyrbt/lxjzh/` (press conferences) with NO pagination.
+   Confirmed live: that page currently lists exactly 4 conferences —
+   Sept 1st through 4th (today) — because FMPRC has held 4 conferences
+   since Aug 31, and its list page apparently only surfaces a handful
+   of the most recent ones. On the OLD database, Aug 26/27/28/31's
+   conferences were sitting in `entries` because they were discovered
+   back when THEY were the current 4 on that same list page — normal
+   week-to-week incremental use never has to look further back than
+   "whatever's on the front page right now." On a freshly-wiped (or
+   brand-new) database, that history doesn't exist yet, and Aug 25-31
+   has already scrolled off the discoverable page entirely — there is
+   currently no way to reach it. Confirmed directly: fed the 4 exact,
+   previously-verified Aug URLs straight into `process_fmprc_item()`
+   (bypassing list discovery) and all 4 correctly classified as
+   relevant and queued 6/6 times on repeat — the CONTENT and the
+   CLASSIFIER are both fine. The gap is entirely in discovery: this
+   source (and likely others without deep pagination — MFA leadership
+   in particular looks similarly shallow) can only ever discover
+   content that's STILL on the current front page.
+
+**This is the real, complete answer to "is it the new model": no.**
+Every piece of this — the MND ordering bug, the FMPRC discoverability
+ceiling — is unrelated to gemini-3.6-flash, thinking, or pricing. It's
+an architectural property of "fetch page 1, no pagination" sources:
+they work perfectly for normal week-to-week use (this project's
+whole testing history all along), because nothing has to be
+rediscovered — but they cannot backfill a week that's already scrolled
+off the list, which is EXACTLY what a brand-new install, OR a
+freshly-wiped database like the one created for user's test today, and
+apparently ALSO the coworker's genuine first-ever run, all have in
+common. The 16-vs-5 entry gap this session found is the real, honest
+size of that limitation for this one week.
+
+Restored `output/tracker.db` from the pre-wipe backup immediately
+after confirming the above (renamed the fresh-test DB to
+`tracker.db.fresh-test-20260904` rather than deleting it, in case its
+data is useful later) — the wipe had already served its diagnostic
+purpose, and there was no reason to leave the user on a degraded
+16→5-entry database a moment longer than needed. Re-rendered
+`US-China Tracker Aug 25-31, 2026.docx` from the restored DB to match.
+
+Open question, NOT fixed today, flagged for a real decision: does the
+coworker's genuine first-time install need every shallow-list source
+(FMPRC both endpoints, MFA leadership both endpoints, at minimum) given
+the same real pagination SCIO/MND now have? That's a bigger, multi-
+source change, not a quick fix — worth a deliberate go/no-go rather
+than doing it reflexively under time pressure.
