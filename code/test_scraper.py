@@ -143,6 +143,27 @@ class TestRelevanceKeywordBoundaries(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNotNone(S.RELEVANCE_KEYWORDS.search(text))
 
+
+class TestKeywordsAddedFromPastTrackerResearch(unittest.TestCase):
+    """
+    rare earths / transshipment / de minimis — added 2026-09-04 after
+    checking real past-tracker content per direct user request: all
+    three appeared in genuine, already-included entries with zero prior
+    keyword coverage (rare earths was only in the X-specific search
+    terms, not the general list every other source uses; transshipment
+    and de minimis had no coverage anywhere).
+    """
+
+    def test_rare_earths_matches(self):
+        self.assertIsNotNone(S.RELEVANCE_KEYWORDS.search("a rare earth export deal"))
+        self.assertIsNotNone(S.RELEVANCE_KEYWORDS.search("rare earths leverage in trade talks"))
+
+    def test_transshipment_matches(self):
+        self.assertIsNotNone(S.RELEVANCE_KEYWORDS.search("illegal transshipment of goods through third countries"))
+
+    def test_de_minimis_matches(self):
+        self.assertIsNotNone(S.RELEVANCE_KEYWORDS.search("closing the de minimis exemption loophole"))
+
     def test_plural_forms_of_singular_keywords_still_match(self):
         # Adding the trailing \b above (to fix the AI/aircraft bug) also
         # silently broke ordinary plurals of the affected single-word
@@ -312,6 +333,21 @@ class TestExplicitUsMention(unittest.TestCase):
         for text in ["let us know if you have questions", "join us for the event"]:
             with self.subTest(text=text):
                 self.assertIsNone(S._EXPLICIT_US_MENTION_RE.search(text))
+
+    def test_matches_officials_added_2026_09_04_for_hallucination_list_parity(self):
+        # Found live: this regex had drifted out of sync with
+        # _HALLUCINATION_CHECK_SURNAMES, which already tracked these 8
+        # names as real, current officials this project cares about.
+        for name in ("Greer", "Vance", "Perdue", "Hegseth", "Gabbard", "Ratcliffe", "Leavitt"):
+            with self.subTest(name=name):
+                self.assertIsNotNone(S._EXPLICIT_US_MENTION_RE.search(f"Secretary {name} spoke today."))
+
+    def test_matches_stephen_miller_full_name_but_not_bare_surname(self):
+        # "Miller" alone is too common a surname for a gate with no LLM
+        # judgment downstream — checked live, it false-positives on
+        # completely unrelated content. Full name only.
+        self.assertIsNotNone(S._EXPLICIT_US_MENTION_RE.search("Stephen Miller addressed reporters."))
+        self.assertIsNone(S._EXPLICIT_US_MENTION_RE.search("a Miller classic played at the event"))
 
 
 class TestClassifyByLabels(unittest.TestCase):
@@ -1574,6 +1610,81 @@ class TestMofcomLxxwfbhDateFallback(unittest.TestCase):
         d = self._resolve("https://example.com/no-date-here/index.html", "no date info at all")
         self.assertEqual(d, S.date.min)
         self.assertNotEqual(d, S._utcnow().date())
+
+
+class TestExplicitChinaMentionRe(unittest.TestCase):
+    """
+    _EXPLICIT_CHINA_MENTION_RE — the "auto-include, no LLM call" gate in
+    classify_relevance's two-tier design (added 2026-09-04, direct user
+    request: explicit China/Taiwan/HK mentions should never need an LLM
+    judgment call at all, only genuinely ambiguous/adjacent-only terms
+    should). Deliberately broader than _CHINA_MENTION_RE (which excludes
+    Taiwan/Hong Kong on purpose, for its own narrower job).
+    """
+
+    def test_matches_direct_country_and_region_terms(self):
+        for term in ("China", "Chinese", "Beijing", "PRC", "Xi Jinping",
+                     "Taiwan", "Hong Kong", "Xinjiang", "Tibet"):
+            with self.subTest(term=term):
+                self.assertTrue(S._EXPLICIT_CHINA_MENTION_RE.search(f"A report mentioning {term} today."))
+
+    def test_matches_named_chinese_companies(self):
+        for term in ("Huawei", "TikTok", "CATL", "BYD", "COSCO", "SMIC"):
+            with self.subTest(term=term):
+                self.assertTrue(S._EXPLICIT_CHINA_MENTION_RE.search(f"A deal involving {term}."))
+
+    def test_matches_ministry_of_commerce_and_senior_officials(self):
+        # Found live 2026-09-04, checking real past-tracker content: these
+        # name the entity/official directly without "China" nearby.
+        self.assertTrue(S._EXPLICIT_CHINA_MENTION_RE.search(
+            "The Ministry of Commerce released a list of entities under control."))
+        self.assertTrue(S._EXPLICIT_CHINA_MENTION_RE.search("Foreign Minister Wang Yi met with officials."))
+        self.assertTrue(S._EXPLICIT_CHINA_MENTION_RE.search("Vice Premier He Lifeng attended the summit."))
+
+    def test_does_not_match_bare_surname_of_a_chinese_official(self):
+        # "Wang"/"He" alone are far too common/ambiguous to gate
+        # auto-inclusion on — full names only, same reasoning as
+        # "Stephen Miller" (not bare "Miller") on the US side.
+        self.assertIsNone(S._EXPLICIT_CHINA_MENTION_RE.search("Mr. Wang gave a speech."))
+
+    def test_does_not_match_adjacent_ambiguous_terms_alone(self):
+        # These alone should NOT trigger auto-include — they're exactly
+        # the "maybe" bucket that still needs an LLM judgment call.
+        text = ("A release about tariffs, trade wars, sanctions, export "
+                "controls, semiconductors, chips, decoupling, and de-risking "
+                "between the United States and various trading partners.")
+        self.assertIsNone(S._EXPLICIT_CHINA_MENTION_RE.search(text))
+
+
+class TestCleanTableLikeFragment(unittest.TestCase):
+    """
+    _clean_table_like_fragment() — found live, 2026-09-04, right after
+    the two-tier classify_relevance gate started auto-including items
+    where China/Taiwan/Hong Kong is only a data-table row (previously
+    filtered out upstream by the LLM judgment this gate now skips): a
+    real Treasury statistical holdings report produced a "paragraph"
+    that was actually a raw table row, "Taiwan\\n668\\n668\\n*\\n0". Per
+    direct user request, this is a formatting cleanup, not a reason to
+    drop the entry — a real China/Taiwan mention is still a real hit.
+    """
+
+    def test_cleans_a_real_table_row_fragment(self):
+        self.assertEqual(
+            S._clean_table_like_fragment("Taiwan\n668\n668\n*\n0"),
+            "Taiwan, 668, 668, *, 0",
+        )
+
+    def test_leaves_real_multiline_prose_untouched(self):
+        prose = "The Secretary said:\nWe stand firmly with our allies.\nThis is our policy."
+        self.assertEqual(S._clean_table_like_fragment(prose), prose)
+
+    def test_leaves_text_with_fewer_than_3_lines_untouched(self):
+        short = "China\n0"
+        self.assertEqual(S._clean_table_like_fragment(short), short)
+
+    def test_single_line_text_untouched(self):
+        text = "This is a completely normal single-line sentence about China."
+        self.assertEqual(S._clean_table_like_fragment(text), text)
 
 
 if __name__ == "__main__":

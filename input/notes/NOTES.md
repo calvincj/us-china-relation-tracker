@@ -5277,3 +5277,131 @@ re-spending on items already checked. Entries table untouched (still
 suite run: 160 tests, all green. Left the accumulated `.bak-*`/
 `.fresh-test-*` files in `output/` (gitignored, harmless) rather than
 deleting anything without being asked to.
+
+2026-09-04 continued — major, deliberate editorial-philosophy change to
+`classify_relevance`, per explicit, repeated direct user request. User
+noticed a real X tweet (Rapid Response 47, Bessent on Iranian
+oil/Chinese remittances) was correctly discovered but rejected by the
+LLM's "China mentioned only in passing" carve-out — the same carve-out
+this session added earlier in the week to fix a real false positive
+(a Canada-trade release naming China only as a rhetorical aside). First
+tried narrowing the carve-out's wording (distinguish "bare rhetorical
+comparison" from "a specific factual claim about China's own role,"
+verified live 3x against both the original false-positive case and
+the new false-negative case) — user pushed further: asked whether
+better keyword logic could replace the LLM step for these cases
+entirely, and stated a clear, explicit priority: missing a real entry
+is worse than including an unrelated one, and this should be reflected
+architecturally, not just in prompt wording.
+
+Corrected an imprecise claim made along the way: of the 4 historical
+false-positive examples cited (Cook Islands anniversary greeting,
+US-Italy critical minerals, Foundry School, a statistical holdings
+table), only 2 (Foundry School, the statistical table) actually contain
+a literal China/Taiwan/HK word — the other 2 have ZERO such word and
+only matched the keyword pre-filter via a generic adjacent term
+(tariffs, trade deficits, etc., from `_RELEVANCE_ALTERNATIVES`, which
+is deliberately broad to also catch China-relevant content that only
+names China deep in the text). This distinction is what shaped the
+actual fix.
+
+**Implemented a real two-tier architecture**, not another prompt
+tweak: added `_EXPLICIT_CHINA_MENTION_RE` (China/Chinese/Beijing/PRC/
+Xi Jinping/Taiwan/Hong Kong/Xinjiang/Tibet — Xinjiang and Tibet added
+after being flagged as an inconsistency during this exact review, user
+confirmed via AskUserQuestion — plus Huawei/TikTok/CATL/BYD/COSCO/
+SMIC). `classify_relevance` now checks this (or `_EXPLICIT_US_MENTION_
+RE`, already existing, for the `chinese_origin=True` direction)
+immediately after the keyword pre-filter: an explicit match auto-
+returns YES with NO LLM call at all; only text that matched the
+broader pre-filter WITHOUT a direct country/region/entity term routes
+to the LLM. This is a deliberate, explicit precision-for-recall trade:
+it reintroduces the Foundry School and statistical-table false
+positives on purpose (both DO contain a real Taiwan/China word), while
+leaving the Cook Islands/Italy cases exactly as correctly-excluded as
+before (neither has a direct term at all, so both still route to the
+LLM, which already rejects them). Verified live across 5 real cases:
+Foundry-School-shape (auto-include, confirmed), Italy critical-minerals
+(still correctly LLM-rejected), Cook Islands (still free-pre-filter-
+rejected), the Bessent tweet (now auto-included), the original Canada-
+trade rhetorical-comparison case (now also auto-included, expected and
+accepted under the new design), and the symmetric `chinese_origin=True`
+direction (a Chinese release naming a US official by name, confirmed
+auto-included too).
+
+**Found and fixed a real follow-on issue during the same conversation**:
+user asked to see the actual "explicit" vs "maybe" keyword lists this
+change relies on, and separately flagged that raw HTML table rows
+(the statistical-holdings-report case) produce garbled multi-line
+"paragraphs" like `"Taiwan\n668\n668\n*\n0"` once that entry is no
+longer filtered out upstream — explicitly NOT asking for the entry to
+be dropped, asking for the formatting to be cleaned up. Added
+`_clean_table_like_fragment()`: detects a paragraph that's mostly
+short, newline-separated numeric/symbol tokens and collapses it into
+one readable comma-joined line, applied in `extract_key_paragraphs`
+after the existing refusal/length filter. Leaves genuine multi-line
+prose (verified with a real multi-sentence quote) completely untouched
+— the numeric-token ratio is the discriminator, not the mere presence
+of newlines, matching the user's own framing ("detect if text got \n").
+
+Added 12 new regression tests (the explicit-mention regex's positive/
+negative cases, the table-fragment cleaner's positive/negative cases).
+167 tests total, all green.
+
+2026-09-04 continued — user pushed back that the "maybe" (LLM-judged)
+keyword bucket looked too comprehensive, and separately pointed out
+South China Sea/East China Sea should already be explicit "cuz China."
+Checked live: they were right on the second point — `China\w*` already
+matches the "China" substring inside "South China Sea"/"East China
+Sea," so those were never actually in the ambiguous bucket at all; an
+earlier list I gave the user was wrong. User confirmed decoupling/
+de-risk/G7/G20/AI/artificial intelligence are fine staying ambiguous
+(LLM-judged), and asked me to research real past-tracker content for
+examples of genuinely-included entries that used implicit language
+instead of an explicit term, rather than guess.
+
+Did that research (scanned all 4 past-tracker docx files, isolated the
+BOLD summary-style lines specifically — not body Q&A text, which is
+mostly noise for this question since an FMPRC Q&A exchange not saying
+"China" in one specific line is normal, the whole document already
+trivially is China-related). Found 3 real, concrete gaps: (1) "rare
+earth(s)" was already in the X-specific search terms but MISSING from
+the general keyword list every other source uses — a real asymmetry,
+not a deliberate choice; (2) "transshipment" (routing Chinese goods
+through a third country to dodge tariffs) appears in real, already-
+included past-tracker content with zero keyword coverage anywhere; (3)
+"de minimis" (the tariff-free-under-$800 import exemption, closely
+tied to Chinese e-commerce/Shein/Temu) — same, zero coverage. Also
+found "polysilicon" once, but judged it too narrow/single-episode to
+add as a standing keyword (flagged to the user rather than silently
+adding). Added all 3 well-evidenced terms to `_RELEVANCE_ALTERNATIVES`.
+Also added "Ministry of Commerce" to the EXPLICIT tier (not just
+"maybe") — found named directly in real entries with no "China" nearby,
+and there's only one globally-significant one, same reasoning as PRC.
+
+**Separately, user asked me to audit the US-side and China-side
+explicit-mention regexes independently and compare them for
+completeness** ("distinguish the two sides"). Cross-referenced
+`_EXPLICIT_US_MENTION_RE`'s named-official list against
+`_HALLUCINATION_CHECK_SURNAMES` (a DIFFERENT list, built 2026-09-03,
+that already tracks the real current cast of US officials this project
+cares about) and found they'd drifted out of sync: Greer, Vance,
+Perdue, Hegseth, Gabbard, Ratcliffe, Leavitt, and Miller were all
+already tracked there but missing from the relevance regex — meaning
+content naming any of them (without also saying "United States"/
+"Washington" nearby) fell through to LLM judgment instead of getting
+the same free auto-include Rubio/Bessent already get. Added 7 of the
+8 as bare surnames; caught live that the 8th ("Miller") false-positives
+on completely unrelated content ("a Miller classic played...") in a
+way none of the others do — this gate has NO downstream LLM check, so
+a bad match here is a real risk, not a cosmetic one. Used "Stephen
+Miller" (the full name) instead. Added the same kind of check to the
+China side for symmetry: Wang Yi and He Lifeng (both already tracked
+in `KNOWN_NAME_ROMANIZATIONS`) added as full names, explicitly NOT
+bare surnames ("Wang"/"He" alone would be far too common/ambiguous),
+matching the same reasoning just applied to Miller.
+
+Added 14 more regression tests covering all of the above (the new
+keyword terms, the new officials, and — importantly — the negative
+cases proving the risky bare-surname forms do NOT match). Ran the full
+suite: 174 tests, all green.
