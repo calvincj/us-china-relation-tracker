@@ -297,6 +297,16 @@ _RELEVANCE_ALTERNATIVES = (
     # Trade / sanctions / tech
     r"|tariffs?|trade wars?|sanctions?|export controls?|import dut(?:y|ies)|reciprocal"
     r"|semiconductors?|chips?|AI|artificial intelligence|technology transfers?"
+    r"|rare earths?"  # already used in the X search terms; found live 2026-09-04
+                       # (checking real past-tracker content per user request) that
+                       # it was missing from every OTHER source's pre-filter
+    r"|transshipments?|de minimis"  # both found live 2026-09-04 in real past-tracker
+                                     # entries with zero prior keyword coverage —
+                                     # transshipment (routing Chinese goods through a
+                                     # third country to dodge China-specific tariffs)
+                                     # and the de minimis import exemption (the
+                                     # loophole overwhelmingly associated with
+                                     # Chinese e-commerce/Shein/Temu)
     r"|Huawei|TikTok|CATL|BYD|COSCO|SMIC"
     # Territorial / political flashpoints
     r"|Taiwan|Hong Kong|Xinjiang|Tibet|South China Sea|East China Sea"
@@ -361,7 +371,25 @@ _EXPLICIT_US_MENTION_RE = re.compile(
     r"\b(?:U\.S(?!\.?\s*dollars?\b)\b|(?-i:US)(?!\s*dollars?\b)\b"
     r"|United States(?!\s+dollars?\b)"
     r"|(?<!Latin )(?<!South )(?<!Central )America[n]?|Washington"
-    r"|Trump|Biden|Rubio|Bessent|Lutnick|Navarro|Sullivan|Blinken|Yellen)\b",
+    # Kept in sync with _HALLUCINATION_CHECK_SURNAMES — found live,
+    # 2026-09-04, that this list had drifted out of sync with it: Greer,
+    # Vance, Perdue, Hegseth, Gabbard, Ratcliffe, Leavitt, and Miller
+    # were all already tracked elsewhere in this file as real, current
+    # officials but were missing here, meaning content naming any of
+    # them (without also saying "United States"/"Washington" nearby)
+    # fell through to LLM judgment instead of the explicit auto-include
+    # this deserves just as much as naming Rubio or Bessent does.
+    r"|Trump|Biden|Rubio|Bessent|Lutnick|Navarro|Sullivan|Blinken|Yellen"
+    r"|Greer|Vance|Perdue|Hegseth|Gabbard|Ratcliffe|Leavitt"
+    # "Stephen Miller," not bare "Miller" — checked live: the bare
+    # surname false-positives on completely unrelated content ("a Miller
+    # classic," anyone else named Miller) in a way none of the other
+    # names here realistically do. This gate skips LLM judgment
+    # entirely, so a common-surname false match here is a real risk in
+    # a way it wouldn't be for a narrower-purpose check (e.g. the
+    # hallucination list above, which only ever compares against a
+    # specific document already known to be about this tracker's topic).
+    r"|Stephen Miller)\b",
     re.IGNORECASE,
 )
 
@@ -1082,6 +1110,33 @@ def _relevance_snippet(text: str, keyword_hit: re.Match, max_chars: int = 3000) 
     return lead + "\n...\n" + window
 
 
+# Deliberately BROADER than _CHINA_MENTION_RE above (which excludes
+# Taiwan/Hong Kong on purpose, for its own narrower snippet-centering
+# job) — this is the "does this explicitly, unambiguously name the
+# actual country/place/entity" gate for classify_relevance's two-tier
+# design below, so it needs Taiwan/Hong Kong/PRC and the specific named
+# Chinese companies _RELEVANCE_ALTERNATIVES already treats as
+# unambiguous signals, not just the bare word "China" itself.
+_EXPLICIT_CHINA_MENTION_RE = re.compile(
+    r"\b(?:China\w*|Chinese|Beijing|PRC|Xi Jinping|Taiwan|Hong Kong"
+    r"|Xinjiang|Tibet|Huawei|TikTok|CATL|BYD|COSCO|SMIC"
+    # "Ministry of Commerce" — found live 2026-09-04 in real past-tracker
+    # content naming the entity without "China" nearby; there's only one
+    # globally-significant Ministry of Commerce this tracker cares about,
+    # same reasoning as PRC/named companies above.
+    r"|Ministry of Commerce"
+    # Wang Yi (Foreign Minister) / He Lifeng (Vice Premier) — added for
+    # symmetry with the US-side officials list, 2026-09-04; both already
+    # tracked in KNOWN_NAME_ROMANIZATIONS as officials this tracker
+    # names regularly. Full names, not bare surnames — same false-
+    # positive-avoidance reasoning as "Stephen Miller" on the US side
+    # (a bare "Wang" or "He" would be far too common/ambiguous to gate
+    # auto-inclusion on).
+    r"|Wang Yi|He Lifeng)\b",
+    re.IGNORECASE,
+)
+
+
 def classify_relevance(
     model: genai.Client, text: str, chinese_origin: bool = False,
 ) -> tuple[bool, str]:
@@ -1125,6 +1180,32 @@ def classify_relevance(
     keyword_hit = US_SOURCE_RELEVANCE_KEYWORDS.search(text)
     if not keyword_hit:
         return False, "Keyword pre-filter: no US-China-relevant terms found — skipped LLM call."
+
+    # Two-tier gate, per direct user request (2026-09-04): an EXPLICIT,
+    # unambiguous mention of the actual country this direction cares
+    # about (China/Taiwan/Hong Kong for a US-origin source; the US for a
+    # Chinese-origin one) auto-includes with no LLM judgment at all —
+    # only an item that ONLY matched on an adjacent/ambiguous term
+    # (tariffs, decoupling, critical minerals, ...) with no direct
+    # country mention goes to the LLM to decide. Deliberately trades
+    # precision for recall: this brings back real false positives this
+    # session's own tuning had specifically fixed (a Taiwan-named-as-
+    # one-of-8-program-participants item, a China/Taiwan/HK-as-one-row-
+    # in-a-60-country-table item, a China-named-once-as-a-rhetorical-
+    # comparison item) — a deliberate, explicit choice, not an oversight:
+    # the user was clear that missing a genuinely relevant item is worse
+    # than including an unrelated one, and no amount of keyword
+    # engineering can fix the OTHER kind of false positive (Cook Islands,
+    # US-Italy critical minerals — neither has a China/Taiwan/US-side
+    # word at all, so this gate doesn't touch those; they still route to
+    # the LLM exactly as before, which already correctly rejects them).
+    explicit_re = _EXPLICIT_US_MENTION_RE if chinese_origin else _EXPLICIT_CHINA_MENTION_RE
+    if explicit_re.search(text):
+        return True, (
+            f"Keyword pre-filter: explicit "
+            f"{'US' if chinese_origin else 'China/Taiwan/Hong Kong'} mention "
+            f"— included without an LLM judgment call."
+        )
 
     snippet = _relevance_snippet(text, keyword_hit)
 
@@ -1175,12 +1256,23 @@ def classify_relevance(
             "or supply-chain policy that does not name China or a Chinese entity, "
             "or an unrelated country's bilateral news, is NOT relevant — reply NO. "
             "Two more specific NO cases, both real false positives caught live: "
-            "(1) China is named only ONCE, as a rhetorical comparison inside a "
-            "story that is actually about a different country's bilateral "
-            "relationship with the US (e.g., 'Country X, like China, chose "
-            "retaliation over negotiation' inside a release that is otherwise "
-            "entirely about Country X) — that single aside does not make the "
-            "release substantively about China; reply NO. (2) China/Taiwan/Hong "
+            "(1) China is named only ONCE, as a bare RHETORICAL COMPARISON with "
+            "no independent factual claim about China's own conduct — e.g., "
+            "'Country X, like China, chose retaliation over negotiation' inside "
+            "a release that is otherwise entirely about Country X — that single "
+            "aside does not make the release substantively about China; reply "
+            "NO. Distinguish this from a case, also brief, where the mention "
+            "makes an actual factual/analytical CLAIM about what China itself "
+            "is doing, providing, or capable of — e.g., 'even if Iran got "
+            "remittances from China, that would run out' is a specific claim "
+            "about China's role as a potential economic lifeline, not a mere "
+            "comparison; that IS substantive enough — reply YES even though "
+            "it's one sentence in a release mostly about a third country. The "
+            "test for (1) is whether the sentence would read identically with "
+            "China swapped out for a random other country's name (a pure "
+            "comparison, e.g. 'like China' or 'like Russia' changes nothing) — "
+            "if swapping China out would remove the actual substance of the "
+            "claim, it's not a bare comparison, reply YES. (2) China/Taiwan/Hong "
             "Kong appear only as ONE ROW in a statistical table or ranked list "
             "covering many countries (e.g., a country-by-country investment, "
             "trade, or holdings table), with no sentence of actual discussion "
@@ -1508,6 +1600,34 @@ _REFUSAL_RE = re.compile(
 )
 
 
+def _clean_table_like_fragment(text: str) -> str:
+    """
+    Normalize a paragraph-shaped extraction that's actually a raw HTML
+    table row concatenated with newlines — e.g. "Taiwan\n668\n668\n*\n0",
+    a real case found live, 2026-09-04, from a Treasury statistical
+    holdings report where China/Taiwan/Hong Kong are just rows in a
+    ~60-country investment table with no prose about them at all. Per
+    direct user request: NOT a reason to drop the entry (a real China/
+    Taiwan mention explicitly names them, so classify_relevance's
+    two-tier gate correctly includes it) — just a formatting cleanup so
+    a broken multi-line blob of bare numbers doesn't get written into
+    the tracker doc looking like a real sentence.
+
+    Detects "mostly short, newline-separated numeric/symbol tokens" and
+    collapses it into one readable, comma-joined line. Leaves genuine
+    prose (even multi-line prose, e.g. a quote with line breaks)
+    untouched — the numeric-token ratio is the discriminator, not the
+    mere presence of newlines.
+    """
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    if len(lines) < 3:
+        return text
+    numeric_like = sum(1 for ln in lines if len(ln) <= 12 and re.fullmatch(r"[\d,.*%$\-]+", ln))
+    if numeric_like / len(lines) >= 0.6:
+        return ", ".join(lines)
+    return text
+
+
 def extract_key_paragraphs(
     model: genai.Client, text: str, n: int = 4,
 ) -> list[str]:
@@ -1561,6 +1681,7 @@ def extract_key_paragraphs(
         p for p in paras
         if len(p) > 20 and not _REFUSAL_RE.match(p) and not re.match(r"^NONE\b", p, re.IGNORECASE)
     ]
+    paras = [_clean_table_like_fragment(p) for p in paras]
     return paras[:n]
 
 
