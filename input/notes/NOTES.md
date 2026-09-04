@@ -5035,3 +5035,86 @@ never have surfaced before today, on any database state, fresh or not.
 Added 5 regression tests for `_parse_mofcom_list_date` covering both
 formats plus None/unparseable input. Ran the full suite: 142 tests
 (137 + 5 new), all green.
+
+2026-09-04 continued — implemented the 3 remaining good-practice items
+from earlier's reflection, per direct user request, plus a
+plain-language error description the user asked for on top:
+
+1. **Pinned every dependency to an exact version** (`==`, not `>=`) in
+   `scripts/requirements.txt`, matching what's actually installed and
+   verified working right now (checked live via `pip show`, not
+   guessed). Left a comment explaining why (this project already lived
+   through one real "something changed underneath us with no warning"
+   incident — the Gemini model retirement — and an unbounded `>=` has
+   the same failure shape) and how to intentionally upgrade later.
+   Verified the pin changes nothing today: `pip install -r
+   scripts/requirements.txt` reports every package already satisfied.
+
+2. **A real cost circuit breaker** (`MAX_RUN_USD = 5.00`, ~15-20x a
+   normal run's real logged cost, overridable via `--max-cost`). The
+   interesting part was where NOT to put the actual raise: `_log_usage`
+   is called deep inside `call_llm`/`call_llm_json`, underneath 25+
+   separate `except Exception:` blocks across every `process_*_item`
+   function — raising a plain exception that deep would need to survive
+   every single one of those uncorrupted to actually stop anything, and
+   missing even one would silently defeat the whole breaker (the exact
+   "forgot one of many call sites" mistake already found and fixed
+   earlier the same day for per-item error isolation). Instead,
+   `_log_usage` only accumulates into `_RUN_SPEND_USD`; a new
+   `_check_cost_limit()` is called at exactly two well-controlled
+   points — the start of `_isolate_item_errors` (before each item) and
+   the start of main()'s `run()` wrapper (before each source) — both of
+   which explicitly catch and re-raise a dedicated `CostLimitExceeded`
+   instead of swallowing it like every ordinary exception. Wrapped
+   main()'s whole per-source dispatch block in a try/except for it
+   (a real, careful reindent of ~70 lines, done the same deliberate way
+   as the earlier `logging_redirect_tqdm` wrap — write via a script,
+   not manual Edit, for reliability) so a trip still renders and saves
+   whatever was found before stopping, with a clear "⚠ STOPPED EARLY"
+   line in the final summary rather than a raw traceback. Verified live:
+   forced a real Gemini call, set the limit below its actual cost,
+   confirmed `_check_cost_limit()` raises and that `_isolate_item_
+   errors` correctly lets it through uncaught while still swallowing
+   ordinary exceptions exactly as before. 5 new regression tests.
+
+3. **A concurrent-run lock** (`_acquire_run_lock()`/`_release_run_lock()`,
+   a plain PID file at `output/.tracker.lock` rather than a real OS-level
+   lock — this needs to work identically on both Mac and Windows without
+   a new dependency). Detects a stale lock from a crashed previous run
+   by checking whether the recorded PID is still actually alive
+   (`os.kill(pid, 0)` on Mac, shelling out to `tasklist` on Windows,
+   since Windows has no standard-library equivalent) rather than trusting
+   the file's mere existence — a stale lock that could never clear
+   itself would be worse than the problem it solves. Registered via
+   `atexit` right after a successful acquire (not a hand-written
+   try/finally around the rest of main(), to avoid yet another large
+   reindent) so it releases on normal completion or any unhandled
+   exception/sys.exit(), while a hard kill still leaves a stale lock —
+   exactly the case the liveness check exists to recover from next run.
+   Verified live: a second acquire while one is genuinely held exits
+   immediately with a clear message; a lock file with a dead PID gets
+   detected as stale and silently cleared; a real end-to-end run
+   acquires and cleanly releases the lock file with nothing left behind.
+   5 new regression tests using a temp file, not the real lock path.
+
+4. **Plain-language error descriptions**, per direct user request
+   ("when an error occurs ... add short description of what caused
+   that specific error, so user knows"). Added `_ERROR_DESCRIPTIONS`
+   (pattern → plain-English cause: rate limits, connection resets,
+   timeouts, DNS failures, SSL problems, 404/403/5xx, malformed
+   responses, "model not found") and `_describe_error_text()`/
+   `_describe_error()` to apply it. Applied in exactly ONE place —
+   `_SourceErrorCapture.emit()`, the single choke point every source's
+   end-of-run error summary already flows through (added 2026-09-03) —
+   rather than touching each of the 25+ individual `except Exception:
+   log.error(...)` call sites, same centralization reasoning as
+   `_isolate_item_errors`. Also applied to the two other places that
+   log an error message users actually see: main()'s `run()` wrapper's
+   "[key] Unhandled error" line and `_isolate_item_errors` itself. A
+   guess that's wrong is worse than no guess, so this only fires on
+   patterns it's reasonably confident about and leaves anything else
+   completely unchanged. 4 new regression tests; updated one existing
+   test whose expected value predated this enrichment.
+
+Ran the full suite after all 4 of the above: 155 tests (142 + 13 new),
+all green.

@@ -854,6 +854,9 @@ class TestSourceErrorCapture(unittest.TestCase):
     logs constantly."""
 
     def test_captures_error_level_messages(self):
+        # "timeout" matches _ERROR_DESCRIPTIONS (see TestDescribeError
+        # below), so the captured message gets a plain-language cause
+        # appended — that enrichment is intentional, added 2026-09-04.
         capture = S._SourceErrorCapture()
         S.log.addHandler(capture)
         try:
@@ -863,7 +866,8 @@ class TestSourceErrorCapture(unittest.TestCase):
             S.log.removeHandler(capture)
         self.assertEqual(capture.messages, [
             "[scio] Failed to fetch list",
-            "[scio] Error on http://example.com: timeout",
+            "[scio] Error on http://example.com: timeout "
+            "(likely cause: the website took too long to respond)",
         ])
 
     def test_does_not_capture_info_level_messages(self):
@@ -1345,6 +1349,133 @@ class TestParseMofcomListDate(unittest.TestCase):
 
     def test_unparseable_text_returns_none(self):
         self.assertIsNone(S._parse_mofcom_list_date("not a date"))
+
+
+class TestCostLimitCircuitBreaker(unittest.TestCase):
+    """
+    _check_cost_limit() / CostLimitExceeded — a real spend safety net,
+    added 2026-09-04 per user request. Checked at exactly two points
+    (start of _isolate_item_errors, start of main()'s run() wrapper)
+    rather than raised from inside _log_usage deep in the call stack —
+    see CostLimitExceeded's own docstring for why: this file has 25+
+    separate `except Exception` blocks between there and the top level,
+    any one of which would silently swallow a plain exception raised
+    that deep.
+    """
+
+    def setUp(self):
+        self._orig_limit = S.MAX_RUN_USD
+        self._orig_spend = S._RUN_SPEND_USD
+
+    def tearDown(self):
+        S.MAX_RUN_USD = self._orig_limit
+        S._RUN_SPEND_USD = self._orig_spend
+
+    def test_does_not_raise_under_the_limit(self):
+        S.MAX_RUN_USD = 5.00
+        S._RUN_SPEND_USD = 1.00
+        S._check_cost_limit()  # should not raise
+
+    def test_raises_once_over_the_limit(self):
+        S.MAX_RUN_USD = 5.00
+        S._RUN_SPEND_USD = 5.01
+        with self.assertRaises(S.CostLimitExceeded):
+            S._check_cost_limit()
+
+    def test_isolate_item_errors_propagates_cost_limit_exceeded(self):
+        # The whole point: unlike a plain exception, this one must NOT
+        # be swallowed and logged — it has to actually stop the run.
+        S.MAX_RUN_USD = 0.01
+        S._RUN_SPEND_USD = 1.00
+        with self.assertRaises(S.CostLimitExceeded):
+            with S._isolate_item_errors("testsrc", "http://example.com"):
+                pass  # never reached — the limit check runs before the body
+
+    def test_isolate_item_errors_still_swallows_ordinary_exceptions(self):
+        # Confirms the fix didn't accidentally break the original
+        # per-item error isolation for everything else.
+        S.MAX_RUN_USD = 5.00
+        S._RUN_SPEND_USD = 0.0
+        with S._isolate_item_errors("testsrc", "http://example.com"):
+            raise RuntimeError("an ordinary, unrelated failure")
+        # no exception escaped — isolation still works for normal errors
+
+
+class TestDescribeError(unittest.TestCase):
+    """
+    _describe_error_text() / _describe_error() — added 2026-09-04 per
+    user request: the raw exception text shown in the terminal ("429",
+    "Connection reset by peer", a bare traceback repr) means something
+    specific to someone who has read this codebase, nothing at all to
+    someone who hasn't.
+    """
+
+    def test_appends_a_cause_for_a_known_pattern(self):
+        result = S._describe_error_text("[mofcom] Failed: Connection reset by peer")
+        self.assertIn("Connection reset by peer", result)
+        self.assertIn("likely cause:", result)
+        self.assertIn("closed the connection", result)
+
+    def test_matches_case_insensitively(self):
+        result = S._describe_error_text("HTTP 404: page not found")
+        self.assertIn("likely cause:", result)
+
+    def test_leaves_unmatched_text_unchanged(self):
+        text = "some genuinely novel failure mode nothing here recognizes"
+        self.assertEqual(S._describe_error_text(text), text)
+
+    def test_exception_object_variant_matches_the_text_variant(self):
+        exc = RuntimeError("429 rate limited")
+        self.assertEqual(S._describe_error(exc), S._describe_error_text(str(exc)))
+
+
+class TestConcurrentRunLock(unittest.TestCase):
+    """
+    _acquire_run_lock()/_release_run_lock() — added 2026-09-04 per user
+    request, so two overlapping runs can't independently discover and
+    bill the same brand-new item (see _acquire_run_lock's own docstring).
+    Uses a real temp file for S._LOCK_PATH rather than the project's
+    real output/ lock, so this can't interfere with an actual run.
+    """
+
+    def setUp(self):
+        self._orig_lock_path = S._LOCK_PATH
+        fd, self.tmp_lock = tempfile.mkstemp(suffix=".lock")
+        os.close(fd)
+        os.remove(self.tmp_lock)  # want the PATH, not an existing file
+        S._LOCK_PATH = self.tmp_lock
+
+    def tearDown(self):
+        try:
+            os.remove(S._LOCK_PATH)
+        except OSError:
+            pass
+        S._LOCK_PATH = self._orig_lock_path
+
+    def test_acquire_writes_our_own_pid(self):
+        S._acquire_run_lock()
+        with open(S._LOCK_PATH) as f:
+            self.assertEqual(int(f.read().strip()), os.getpid())
+
+    def test_second_acquire_while_held_exits(self):
+        S._acquire_run_lock()
+        with self.assertRaises(SystemExit):
+            S._acquire_run_lock()
+
+    def test_stale_lock_from_a_dead_pid_is_cleared(self):
+        with open(S._LOCK_PATH, "w") as f:
+            f.write("999999999")  # not a real running PID
+        S._acquire_run_lock()  # should NOT raise/exit
+        with open(S._LOCK_PATH) as f:
+            self.assertEqual(int(f.read().strip()), os.getpid())
+
+    def test_release_removes_the_file(self):
+        S._acquire_run_lock()
+        S._release_run_lock()
+        self.assertFalse(os.path.exists(S._LOCK_PATH))
+
+    def test_release_is_safe_to_call_when_nothing_is_locked(self):
+        S._release_run_lock()  # should not raise even with no lock file
 
 
 if __name__ == "__main__":
