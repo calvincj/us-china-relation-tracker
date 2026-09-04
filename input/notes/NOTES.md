@@ -4933,3 +4933,41 @@ Ran the full suite after the rewrite: 134 tests, all still green (this
 touches live-network discovery logic no unit test exercises directly,
 which is exactly why the live pagination checks above mattered more
 than the suite here).
+
+2026-09-04 continued — user asked for an updated per-source window
+table, which meant re-measuring the two just-fixed sources' REAL depth
+at the actual page cap rather than guessing — and that re-check found
+a real bug in the code from a few minutes earlier. Fetching all 15
+pages of state.gov's listing only yielded 75 dated items instead of
+the expected 150 (10/page × 15). Root cause:
+`.collection-result-meta` sometimes holds an EXTRA leading `<span>`
+naming an official (e.g. "Marco Rubio") before the actual date span —
+`li.select_one(".collection-result-meta span")` (the code shipped
+minutes earlier) always takes the FIRST span, so any entry with a
+named speaker had its "date" silently be a person's name, failed to
+parse, and got dropped from the page entirely. Not a crash, not a
+loud failure — just quietly missing every entry with a named speaker,
+which turned out to be about half of them.
+
+Fixed by extracting the date-parsing into a standalone
+`_parse_state_result_date(meta_tag)` that tries every span inside the
+container and keeps whichever one actually parses as a real date,
+rather than assuming a fixed position — the same general lesson as
+earlier fixes this week (e.g. _hallucinated_officials' case-sensitivity
+bug): don't assume a rigid shape, verify each candidate instead.
+Re-verified live: all 150 items now parse correctly across
+15 pages (was 75). Added 3 regression tests for the extracted function
+directly (leading-name-then-date, date-only, no-parseable-date) —
+easier and more precise than mocking the whole page fetch. Ran the
+full suite: 137 tests (134 + 3 new), all green.
+
+This is worth remembering as its own lesson, separate from the
+pagination win itself: shipping a live-network scraping fix and
+calling it done after ONE spot-check (this function's first version
+correctly handled the 2-3 examples inspected while building it) isn't
+enough — re-verifying against the FULL real result set surfaced a bug
+spot-checking missed entirely. Also updated `_STATE_PAGE_LIMIT`/
+`_WHITEHOUSE_PAGE_LIMIT`'s real measured depth for the record:
+state.gov now reaches 43 days back (Jul23-Sep4) at the 15-page cap;
+whitehouse.gov reaches 71 days (Jun25-Sep4) — both measured AFTER this
+fix, not before.

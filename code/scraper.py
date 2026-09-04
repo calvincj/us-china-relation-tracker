@@ -3938,6 +3938,30 @@ def process_state_item_by_url(
 
 _STATE_PAGE_LIMIT = 15  # safety cap, same role as _SCIO_PAGE_LIMIT
 
+
+def _parse_state_result_date(meta_tag) -> date | None:
+    """
+    Extract the real publish date out of one state.gov
+    `.collection-result-meta` container. That container sometimes holds
+    an EXTRA leading `<span>` naming an official (e.g. "Marco Rubio")
+    BEFORE the actual date span, on any entry with a named speaker —
+    found live, 2026-09-04, the same day the pagination this feeds was
+    shipped: grabbing the first span unconditionally
+    (`select_one(".collection-result-meta span")`) silently returned
+    "Marco Rubio" as the "date" for those entries, which then failed to
+    parse and got silently dropped from the whole page — not a crash,
+    just quietly missing entries with a named speaker specifically.
+    Fixed by trying every span in the container and keeping whichever
+    one actually parses as a real date, instead of assuming a fixed
+    position.
+    """
+    for span in meta_tag.find_all("span"):
+        try:
+            return datetime.strptime(span.get_text(strip=True), "%B %d, %Y").date()
+        except ValueError:
+            continue
+    return None
+
 def scrape_state(
     model: genai.Client,
     conn: sqlite3.Connection,
@@ -3979,12 +4003,11 @@ def scrape_state(
         page_items: list[tuple[date, str, str]] = []
         for li in soup.find_all("li", class_="collection-result"):
             a = li.find("a", class_="collection-result__link", href=True)
-            date_span = li.select_one(".collection-result-meta span")
-            if not a or not date_span:
+            meta = li.select_one(".collection-result-meta")
+            if not a or not meta:
                 continue
-            try:
-                item_date = datetime.strptime(date_span.get_text(strip=True), "%B %d, %Y").date()
-            except ValueError:
+            item_date = _parse_state_result_date(meta)
+            if item_date is None:
                 continue
             title = a.get_text(strip=True)
             if title:

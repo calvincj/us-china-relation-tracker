@@ -1289,5 +1289,39 @@ class TestAtomicDocSave(unittest.TestCase):
             self.assertEqual(leftovers, [])
 
 
+class TestParseStateResultDate(unittest.TestCase):
+    """
+    _parse_state_result_date() — found live, 2026-09-04, the same day
+    state.gov's real pagination shipped: some `.collection-result-meta`
+    containers have an extra leading span naming an official (e.g.
+    "Marco Rubio") BEFORE the real date span, which a naive "just take
+    the first span" selector silently misread as the date, dropping
+    those specific entries.
+    """
+
+    def _meta(self, html: str):
+        from bs4 import BeautifulSoup
+        return BeautifulSoup(html, "html.parser").find("div")
+
+    def test_leading_name_span_is_skipped_for_the_real_date_span(self):
+        meta = self._meta(
+            '<div class="collection-result-meta">'
+            '<span>Marco Rubio</span><span>August 12, 2026</span></div>'
+        )
+        self.assertEqual(S._parse_state_result_date(meta), S.date(2026, 8, 12))
+
+    def test_single_date_span_with_no_name(self):
+        meta = self._meta(
+            '<div class="collection-result-meta"><span>September 1, 2026</span></div>'
+        )
+        self.assertEqual(S._parse_state_result_date(meta), S.date(2026, 9, 1))
+
+    def test_no_parseable_date_returns_none(self):
+        meta = self._meta(
+            '<div class="collection-result-meta"><span>Someone Else</span></div>'
+        )
+        self.assertIsNone(S._parse_state_result_date(meta))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
