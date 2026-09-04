@@ -5118,3 +5118,61 @@ plain-language error description the user asked for on top:
 
 Ran the full suite after all 4 of the above: 155 tests (142 + 13 new),
 all green.
+
+2026-09-04 continued — thorough re-audit of every source, per direct
+user request ("check all sources, don't skip/neglect ones again,
+verify safeguards for all possible errors"). Systematically checked,
+not just spot-checked: every entry in the `SOURCES` dict has a real
+`run(...)` dispatch call in main() (17 active + wardept intentionally
+excluded, matching its own DISABLED note); every one of those routes
+through `_isolate_item_errors` at its per-item loop (12 call sites
+covering all 17, several functions shared across multiple SOURCES
+keys); every `process_*_item` function still has its own internal
+try/except intact after today's edits (confirmed via a script checking
+all 11, not by eye) — `process_x_tweet` correctly remains the one
+exception, by design, relying entirely on the outer wrap.
+
+Found 2 real, previously-unnoticed gaps this way:
+
+1. **`scrape_x`'s two search groups (china/prc) weren't isolated from
+   each other** — only per-TWEET errors were. `_x_search_recent`'s own
+   status-code check turns an API error RESPONSE into a graceful empty
+   list, but a lower-level failure (missing `X_API_KEY`, a genuine
+   network exception straight from `httpx`) would raise out of the
+   per-group loop and skip the second group entirely just because the
+   first one failed — the exact same one-failure-blocks-an-unrelated-
+   sibling shape already fixed for per-item processing earlier the same
+   day, just one level up. Fixed by wrapping each group's own search +
+   processing in `_isolate_item_errors` too. Verified live: simulated
+   group "china" raising, confirmed group "prc" still gets attempted
+   (previously it would not have been). 1 new regression test.
+
+2. **No top-level safety net around main() itself.** Everything INSIDE
+   the per-source dispatch loop is now well-protected, but nothing
+   covered the SETUP that happens before that loop even starts —
+   `init_llm()` raising on a malformed key, `init_db()`/
+   `get_or_create_doc()` raising on a corrupted local file, or any other
+   early failure would show a raw Python traceback instead of a clear
+   message. Fixed by wrapping ONLY the outer `if __name__ == "__main__":
+   main()` invocation (not main()'s internals, to avoid yet another
+   large reindent) in a try/except that lets `SystemExit` through
+   unchanged (--check, an argparse error, and the concurrent-run lock
+   already print their own clear messages), turns `KeyboardInterrupt`
+   into a plain "Stopped." instead of a traceback, and applies
+   `_describe_error()` to anything else before exiting with code 1.
+   Verified live both ways: a real run with `GEMINI_API_KEY` temporarily
+   blanked out in the actual `.env` file (restored immediately after)
+   now prints a clean one-line explanation and exits 1, instead of a
+   raw traceback.
+
+Ran the full suite after both fixes: 156 tests (155 + 1 new), all
+green.
+
+Reviewed but found no further action needed: `flush_pending_entries`'s
+mark-seen-after-save ordering (already correct, 2026-09-01);
+`render_doc_for_range`'s per-week regeneration (already correct,
+confirmed multiple times this session); every `scrape_mofcom_section`-
+based source's empty-list handling (no explicit early-return needed —
+an empty `raw_links` already flows through to "0 new items" safely
+with no special-casing required, confirmed by tracing the code, not
+assumed).

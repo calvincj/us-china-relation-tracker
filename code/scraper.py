@@ -5471,27 +5471,38 @@ def scrape_x(model: genai.Client, conn: sqlite3.Connection, doc: Document) -> No
     search_groups_state = state.get("_search_groups", {})
 
     for group_key, group_accounts, terms in groups:
-        query = build_x_search_query(group_accounts, terms)
-        since_id = search_groups_state.get(group_key, {}).get("since_id")
-        # 100, not MAX_NEW_ITEMS_PER_RUN (30) — that constant is calibrated
-        # for "max items from ONE list page," but one search call here
-        # covers MULTIPLE accounts' combined matches, so reusing it would
-        # be tighter than intended and risk missing real content during a
-        # busy week. 100 is "recent search"'s own documented per-call max.
-        tweets = _x_search_recent(query, since_id, max_results=100)
-        log.info(f"[x/{group_key}] {len(tweets)} new matching tweets since last run")
+        # Each group is isolated too, not just each tweet within a group —
+        # found while re-auditing every source for gaps, 2026-09-04:
+        # _x_search_recent()'s own HTTP-status check already turns an API
+        # error response into a graceful empty list, but a lower-level
+        # failure (missing X_API_KEY, a genuine network exception from
+        # httpx itself) would raise straight out of this loop and skip
+        # the "prc" group entirely just because "china" failed first —
+        # the exact same one-failure-blocks-an-unrelated-sibling shape
+        # already found and fixed for per-item processing earlier today,
+        # just one level up (per-group instead of per-item).
+        with _isolate_item_errors(f"x/{group_key}", "group search"):
+            query = build_x_search_query(group_accounts, terms)
+            since_id = search_groups_state.get(group_key, {}).get("since_id")
+            # 100, not MAX_NEW_ITEMS_PER_RUN (30) — that constant is calibrated
+            # for "max items from ONE list page," but one search call here
+            # covers MULTIPLE accounts' combined matches, so reusing it would
+            # be tighter than intended and risk missing real content during a
+            # busy week. 100 is "recent search"'s own documented per-call max.
+            tweets = _x_search_recent(query, since_id, max_results=100)
+            log.info(f"[x/{group_key}] {len(tweets)} new matching tweets since last run")
 
-        for tweet in tweets:
-            with _isolate_item_errors(f"x/{group_key}", f"tweet {tweet.get('id', '?')}"):
-                process_x_tweet(tweet.get("username", "?"), tweet, model, conn)
+            for tweet in tweets:
+                with _isolate_item_errors(f"x/{group_key}", f"tweet {tweet.get('id', '?')}"):
+                    process_x_tweet(tweet.get("username", "?"), tweet, model, conn)
 
-        # Explicit max(), not tweets[0] — search results are typically
-        # newest-first but that's not a documented guarantee the way it
-        # is for the old timeline endpoint, and getting this wrong would
-        # silently re-bill (though never lose) content. Staged, not
-        # saved — see this function's docstring.
-        if tweets:
-            _PENDING_X_SINCE_IDS[group_key] = str(max(int(t["id"]) for t in tweets))
+            # Explicit max(), not tweets[0] — search results are typically
+            # newest-first but that's not a documented guarantee the way it
+            # is for the old timeline endpoint, and getting this wrong would
+            # silently re-bill (though never lose) content. Staged, not
+            # saved — see this function's docstring.
+            if tweets:
+                _PENDING_X_SINCE_IDS[group_key] = str(max(int(t["id"]) for t in tweets))
 
         # No REQUEST_SLEEP here — that constant exists for politeness
         # toward government websites being scraped via fetch()/httpx
@@ -6031,4 +6042,26 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # A real top-level safety net, added 2026-09-04 while re-auditing
+    # every source for gaps per user request. Everything INSIDE main()'s
+    # per-source dispatch loop already has real error isolation (see
+    # _isolate_item_errors, main()'s own run() wrapper) — but nothing
+    # protected the setup that happens BEFORE that loop even starts:
+    # init_llm() raising on a malformed key, init_db()/get_or_create_doc()
+    # raising on a corrupted local file, or any other early failure would
+    # have shown a raw Python traceback instead of a clear message. This
+    # wraps only the outer invocation, not main()'s internals, so it adds
+    # zero risk of the kind of large, error-prone reindent this file has
+    # needed elsewhere today.
+    try:
+        main()
+    except SystemExit:
+        raise  # --check, an argparse error, the concurrent-run lock — already print their own clear message
+    except KeyboardInterrupt:
+        print("\n\nStopped.")
+        sys.exit(1)
+    except Exception as exc:
+        print(f"\n✗ Something went wrong and the run couldn't continue: {_describe_error(exc)}")
+        print("If this keeps happening: run with --check first to confirm your setup works, "
+              "or check logs/ for the full detail.")
+        sys.exit(1)
