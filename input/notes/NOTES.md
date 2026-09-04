@@ -4971,3 +4971,67 @@ spot-checking missed entirely. Also updated `_STATE_PAGE_LIMIT`/
 state.gov now reaches 43 days back (Jul23-Sep4) at the 15-page cap;
 whitehouse.gov reaches 71 days (Jun25-Sep4) — both measured AFTER this
 fix, not before.
+
+2026-09-04 continued — user pushed back on an earlier answer calling
+MOFCOM's depth "unconfirmed," correctly (it's one of the more
+important sources). Went and actually measured it instead of leaving
+it a shrug: fetched real dates for every MOFCOM variant. Found
+`mofcom_leadership` (ldrhd) at only ~6 days — shallower than
+fmprc_conf, the most urgent single finding of this whole session's
+audit.
+
+Fixed it, and every other MOFCOM endpoint, by finding MOFCOM's real
+pagination mechanism instead of assuming one didn't exist. The
+API-gateway's JSON envelope carries no pagination metadata, and the
+static page's own script config shows no visible "page 2" control —
+but reading the actual (tiny, ~1KB) `unitbuild.js` the widget loads
+revealed it CAN send an extra `paramJson={"pageNo":N,"pageSize":N,
+"search":...}` field, conditionally, when a page-level `paramsMap`
+variable is present (true only on a search-results page, never on a
+plain index page — which is exactly why grep-ing the static HTML
+never found it). Tested calling the API-gateway directly with that
+`paramJson` added ourselves, regardless of whether the real page would
+ever construct it: confirmed live, `pageNo=2` returns a genuinely
+different 15 items than `pageNo=1`, and even `pageNo=10` still returns
+a full page. This works for every MOFCOM CMS-backed endpoint (the
+base English press-conference index AND all 5 Chinese xwfb/* sections)
+since they all share the identical widget.
+
+Also found, while reading that same list HTML more closely, that the
+date IS shown right in the list markup next to each item — just never
+extracted before (`_fetch_mofcom_cms_list` only ever pulled the link
+and title). Two different formats depending on which index:
+`[2026-09-03]` (bracketed, Chinese sections) vs `08/04/2026`
+(unbracketed, English press conference). This enables the same
+date-aware pagination early-stop as SCIO — walk pages until the
+oldest item on a page is before this run's target start — WITHOUT
+needing a per-item fetch just to know roughly how far back a page
+reaches. Deliberately NOT used as each entry's authoritative date
+(`known_date`) though: a live check found the list's shown date can
+disagree by several days with the date `process_mofcom_item`'s own
+regex finds inside the article body (the list date looks like a
+sync/publish timestamp, not necessarily the real event date) — safe
+to trust for "how far to paginate," not safe to trust for "what date
+does this entry actually belong under." Kept `process_mofcom_item`'s
+existing per-item date derivation completely unchanged to avoid that
+regression risk.
+
+Implementation: added `_paginate_mofcom_cms_list()` (walks pages via
+the new `page_no` param on `_fetch_mofcom_cms_list`, same date-aware
+early-stop shape as `scrape_scio`) and `_parse_mofcom_list_date()`
+(tries both known formats). Rewired all 3 real call sites —
+`scrape_mofcom`, `scrape_mofcom_section` (covers all 5 Chinese
+sections), `scrape_mofcom_lxxwfbh` — to paginate instead of only ever
+seeing page 1. Capped at `_MOFCOM_PAGE_LIMIT = 10`, mirroring
+`_SCIO_PAGE_LIMIT`.
+
+Verified live: pointed `scrape_mofcom_leadership` at Aug 25-31 (the
+week its old ~6-day window couldn't have reached at all) — it
+correctly paginated to page 2, found 30 raw candidates, and 6 of them
+have a real list-shown date inside Aug 25-31 (confirmed by direct
+inspection, not just trusting the log) — content this source could
+never have surfaced before today, on any database state, fresh or not.
+
+Added 5 regression tests for `_parse_mofcom_list_date` covering both
+formats plus None/unparseable input. Ran the full suite: 142 tests
+(137 + 5 new), all green.

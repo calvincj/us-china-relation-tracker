@@ -3593,6 +3593,46 @@ def scrape_fmprc(
 
 # ── Source: MOFCOM ────────────────────────────────────────────────────────────
 
+_MOFCOM_PAGE_LIMIT = 10  # safety cap, same role as _SCIO_PAGE_LIMIT
+
+_MOFCOM_LIST_DATE_RES = (
+    re.compile(r"\[?(\d{4})-(\d{2})-(\d{2})\]?"),           # Chinese xwfb/* sections: "[2026-09-03]"
+    re.compile(r"(\d{2})/(\d{2})/(\d{4})"),                  # English press conference: "08/04/2026"
+)
+
+def _parse_mofcom_list_date(text: str | None) -> date | None:
+    """
+    Parse the date MOFCOM's own list widget shows next to each item —
+    found live, 2026-09-04, right in the API's returned HTML
+    (`<a>title</a><span>[2026-09-03]</span>` on the Chinese xwfb/*
+    sections, `<span>08/04/2026</span>` on the English press-conference
+    index — two different formats, tried in turn). Used ONLY to decide
+    how far to paginate and which items are roughly worth fetching —
+    NOT passed to process_mofcom_item as `known_date`, since a live
+    check found this list-shown date can disagree by several days with
+    the date process_mofcom_item's own regex finds inside the article
+    body itself (the list date looks like a sync/publish timestamp,
+    not necessarily the real event date the article is about). Trusting
+    it for pagination bounds is safe (worst case, a few extra/fewer
+    borderline items get tried); trusting it as the entry's real date
+    would risk mis-dating real entries, so that stays exactly as before.
+    """
+    if not text:
+        return None
+    for pattern in _MOFCOM_LIST_DATE_RES:
+        m = pattern.search(text)
+        if m:
+            g = m.groups()
+            # First pattern is (Y, M, D); second is (M, D, Y) — tell them
+            # apart by which group is the 4-digit year.
+            y, mo, d = (g[0], g[1], g[2]) if len(g[0]) == 4 else (g[2], g[0], g[1])
+            try:
+                return date(int(y), int(mo), int(d))
+            except ValueError:
+                continue
+    return None
+
+
 def _fetch_mofcom_cms_list(
     tag: str,
     list_url: str,
@@ -3600,7 +3640,8 @@ def _fetch_mofcom_cms_list(
     link_pattern: re.Pattern,
     client: httpx.Client,
     skip_index_hrefs: bool = True,
-) -> list[tuple[str, str]]:
+    page_no: int = 1,
+) -> list[tuple[str, str, str | None]]:
     """
     MOFCOM's whole site (both the English mirror and the Chinese
     www.mofcom.gov.cn pages) runs on a JS CMS whose index pages are just a
@@ -3626,18 +3667,35 @@ def _fetch_mofcom_cms_list(
     canonical URL is that directory's own "index.html", e.g.
     ".../swbzklxxwfbh2026n8y27r/index.html" — the blanket substring check
     would otherwise discard every single real link on that page).
+
+    `page_no`: real, working pagination — found live, 2026-09-04, reading
+    the widget's own (tiny, 1KB) `unitbuild.js`: it conditionally sends an
+    extra `paramJson={"pageNo":N,"pageSize":N,"search":...}` field when a
+    page-level `paramsMap` variable is present (a search-results-page-only
+    condition that's never true on a plain index page, which is why this
+    was never visible just reading the static HTML). Calling the SAME
+    API-gateway endpoint directly with that `paramJson` added ourselves
+    works regardless of whether the real page would ever construct it —
+    confirmed live: `pageNo=2` returns a genuinely different 15 items than
+    `pageNo=1`, and even `pageNo=10` still returns a full page, not empty.
+    This is what every `scrape_mofcom*` function was missing before today
+    — each only ever saw a single page's worth (15 items) no matter how
+    far behind a run was.
     """
     origin  = "/".join(list_url.split("/")[:3])  # e.g. "https://www.mofcom.gov.cn"
     api_url = f"{origin}/api-gateway/jpaas-publish-server/front/page/build/unit"
-    log.info(f"[{tag}] {api_url}")
+    query = dict(api_query)
+    if page_no > 1:
+        query["paramJson"] = json.dumps({"pageNo": page_no, "pageSize": 15, "search": ""})
+    log.info(f"[{tag}] {api_url} (page {page_no})")
 
     try:
         time.sleep(REQUEST_SLEEP)
-        api_resp = client.get(api_url, params=api_query, timeout=30.0)
+        api_resp = client.get(api_url, params=query, timeout=30.0)
         api_resp.raise_for_status()
         list_html = api_resp.json()["data"]["html"]
     except Exception as exc:
-        log.error(f"[{tag}] Failed to fetch list via API gateway: {exc}")
+        log.error(f"[{tag}] Failed to fetch list via API gateway (page {page_no}): {exc}")
         return []
 
     soup = BeautifulSoup(list_html, "html.parser")
@@ -3647,8 +3705,50 @@ def _fetch_mofcom_cms_list(
             continue
         href  = urljoin(list_url, a["href"])
         title = a.get_text(strip=True)
-        if title and len(title) > 10:
-            raw_links.append((href, title))
+        if not title or len(title) <= 10:
+            continue
+        date_span = a.find_next_sibling("span")
+        raw_links.append((href, title, date_span.get_text(strip=True) if date_span else None))
+    return raw_links
+
+
+def _paginate_mofcom_cms_list(
+    tag: str,
+    list_url: str,
+    api_query: dict,
+    link_pattern: re.Pattern,
+    client: httpx.Client,
+    skip_index_hrefs: bool = True,
+) -> list[tuple[str, str]]:
+    """
+    Walk `_fetch_mofcom_cms_list` page by page (up to `_MOFCOM_PAGE_LIMIT`),
+    stopping once a page's oldest item (by the list's OWN shown date —
+    see `_parse_mofcom_list_date`'s docstring on why that's fine for this
+    but not for an entry's real recorded date) is already before this
+    run's target start. Same shape as `scrape_scio`'s pagination. Returns
+    plain (href, title) pairs — callers still derive each entry's real
+    date from the full page fetch in process_mofcom_item, unchanged.
+    """
+    raw_links: list[tuple[str, str]] = []
+    for page_no in range(1, _MOFCOM_PAGE_LIMIT + 1):
+        page_items = _fetch_mofcom_cms_list(
+            tag, list_url, api_query, link_pattern, client,
+            skip_index_hrefs=skip_index_hrefs, page_no=page_no,
+        )
+        if not page_items:
+            break
+        raw_links.extend((href, title) for href, title, _ in page_items)
+
+        page_dates = [_parse_mofcom_list_date(d) for _, _, d in page_items]
+        page_dates = [d for d in page_dates if d is not None]
+        if page_dates and _RUN_TARGET_START is not None:
+            oldest_on_page = min(page_dates)
+            if oldest_on_page < _RUN_TARGET_START:
+                log.info(f"[{tag}] Reached {oldest_on_page} on page {page_no}, "
+                         f"before this run's target start ({_RUN_TARGET_START}) "
+                         f"— stopping (list is newest-first, so everything "
+                         f"after this is even older).")
+                break
     return raw_links
 
 
@@ -3669,7 +3769,7 @@ def scrape_mofcom(
     }
     client = make_client(verify_ssl=False)  # MOFCOM cert untrusted by Python CA bundle
 
-    raw_links = _fetch_mofcom_cms_list(
+    raw_links = _paginate_mofcom_cms_list(
         "mofcom", list_url, api_query, re.compile(r"/News/PressConference/"), client
     )
     new_links = [(u, t) for u, t in raw_links if not is_seen(conn, u)][:MAX_NEW_ITEMS_PER_RUN]
@@ -3726,7 +3826,7 @@ def scrape_mofcom_section(
     }
     client = make_client(verify_ssl=False)
 
-    raw_links = _fetch_mofcom_cms_list(
+    raw_links = _paginate_mofcom_cms_list(
         tag, list_url, api_query, re.compile(rf"/xwfb/{section}/art/"), client
     )
     new_links = [(u, t) for u, t in raw_links if not is_seen(conn, u)][:MAX_NEW_ITEMS_PER_RUN]
@@ -3787,7 +3887,7 @@ def scrape_mofcom_lxxwfbh(model: genai.Client, conn: sqlite3.Connection, doc: Do
     }
     client = make_client(verify_ssl=False)
 
-    raw_links = _fetch_mofcom_cms_list(
+    raw_links = _paginate_mofcom_cms_list(
         tag, list_url, api_query, _MOFCOM_LXXWFBH_LINK_RE, client,
         skip_index_hrefs=False,
     )
