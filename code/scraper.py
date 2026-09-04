@@ -3936,54 +3936,91 @@ def process_state_item_by_url(
 
 # ── Source: State Dept ────────────────────────────────────────────────────────
 
+_STATE_PAGE_LIMIT = 15  # safety cap, same role as _SCIO_PAGE_LIMIT
+
 def scrape_state(
     model: genai.Client,
     conn: sqlite3.Connection,
     doc: Document,
 ) -> None:
-    # Route renamed server-side at some point after this was first written:
-    # the custom post type is now `state_press_release` (was
-    # `press_releases`) — confirmed live 2026-08-05 by walking
-    # state.gov/wp-json/'s own route discovery document. The RSS fallback
-    # below was masking this (it's why the source kept working at all), but
-    # fixing the real endpoint means results aren't solely dependent on the
-    # RSS feed's own completeness/latency.
-    api_url = (
-        "https://www.state.gov/wp-json/wp/v2/state_press_release"
-        "?per_page=50&orderby=date&_fields=id,date,title,link,content,excerpt"
-    )
-    rss_url = "https://www.state.gov/rss-feed/press-releases/feed/"
-    client  = make_client()
+    """
+    Switched 2026-09-04 from the WP-JSON API to the real public
+    press-releases HTML listing, with real pagination — found live that
+    the API (`/wp-json/wp/v2/state_press_release`) is served through a
+    CloudFront cache keyed on the URL PATH ONLY: `?page=N`, `?per_page=`,
+    even a random cache-busting param or a totally different query
+    (`?search=china`) all returned byte-identical results (confirmed via
+    `x-cache: Hit from cloudfront` on every one). So the API could only
+    ever see whatever's on its cached "page 1" — measured live the same
+    day content vanished from it within 1-2 days of being published,
+    the shortest window found across every source this session.
+    `state.gov/press-releases/page/N/` (a real WordPress path, not a
+    query string) isn't subject to the same cache-key collapsing —
+    confirmed live, page 2/3 return genuinely older, different content.
+    Reuses process_state_item_by_url() (previously backtest.py-only)
+    since it already does exactly "fetch this URL, extract text, run
+    through process_release_common."
+    """
+    client = make_client()
 
-    log.info("[state] Fetching WP API")
-    items: list[dict] = []
-    resp = fetch(client, api_url)
-    if resp:
-        try:
-            items = resp.json()
-        except Exception:
-            items = []
+    raw_items: list[tuple[date, str, str]] = []
+    for page in range(1, _STATE_PAGE_LIMIT + 1):
+        list_url = (
+            "https://www.state.gov/press-releases/" if page == 1
+            else f"https://www.state.gov/press-releases/page/{page}/"
+        )
+        log.info(f"[state] {list_url}")
+        resp = fetch(client, list_url)
+        if not resp:
+            log.error(f"[state] Failed to fetch {list_url}")
+            break
 
-    if not items:
-        log.warning("[state] WP API failed — trying RSS")
-        resp_rss = fetch(client, rss_url)
-        if resp_rss:
-            items = parse_rss(resp_rss.text)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        page_items: list[tuple[date, str, str]] = []
+        for li in soup.find_all("li", class_="collection-result"):
+            a = li.find("a", class_="collection-result__link", href=True)
+            date_span = li.select_one(".collection-result-meta span")
+            if not a or not date_span:
+                continue
+            try:
+                item_date = datetime.strptime(date_span.get_text(strip=True), "%B %d, %Y").date()
+            except ValueError:
+                continue
+            title = a.get_text(strip=True)
+            if title:
+                page_items.append((item_date, a["href"], title))
 
-    if not items:
-        log.error("[state] Both endpoints failed")
+        if not page_items:
+            break
+        raw_items.extend(page_items)
+
+        oldest_on_page = min(d for d, _, _ in page_items)
+        if _RUN_TARGET_START is not None and oldest_on_page < _RUN_TARGET_START:
+            log.info(f"[state] Reached {oldest_on_page} on page {page}, before "
+                     f"this run's target start ({_RUN_TARGET_START}) — stopping "
+                     f"(list is newest-first, so everything after this is even "
+                     f"older).")
+            break
+
+    if not raw_items:
+        log.error("[state] Found nothing on the press-releases listing at all")
         return
 
-    new_items = [it for it in items if not is_seen(conn, item_url(it))]
+    new_items: list[tuple[str, str, date]] = []
+    for item_date, href, title in raw_items:
+        if _RUN_TARGET_START is not None and item_date < _RUN_TARGET_START:
+            continue
+        if not is_seen(conn, href):
+            new_items.append((href, title, item_date))
+    new_items = new_items[:MAX_NEW_ITEMS_PER_RUN]
     log.info(f"[state] {len(new_items)} new items")
 
-    for it in new_items:
-        url = item_url(it)
+    for url, title, item_date in new_items:
         with _isolate_item_errors("state", url):
-            title = item_title(it)
-            plain = BeautifulSoup(item_content(it), "html.parser").get_text()
-            process_release_common("state", url, title, item_date(it), plain,
-                                    "State Department", model, conn)
+            process_state_item_by_url(
+                url, title, datetime(item_date.year, item_date.month, item_date.day),
+                model, conn, client,
+            )
 
 
 def _resolve_pdf_stub(
@@ -4041,33 +4078,88 @@ def process_whitehouse_item_by_url(
 
 # ── Source: White House ───────────────────────────────────────────────────────
 
+_WHITEHOUSE_PAGE_LIMIT = 15  # safety cap, same role as _SCIO_PAGE_LIMIT
+
 def scrape_whitehouse(
     model: genai.Client,
     conn: sqlite3.Connection,
     doc: Document,
 ) -> None:
-    rss_url = "https://www.whitehouse.gov/news/feed/"
-    client  = make_client()
+    """
+    Switched 2026-09-04 from the RSS feed to the real public news
+    listing, with real pagination — see scrape_state()'s docstring for
+    the fuller story (found live the same day: state.gov's API and this
+    RSS feed share the same underlying problem, a fixed small window
+    that recent content can already fall out of). An RSS feed has no
+    "page 2" to reach for at all by design; `whitehouse.gov/news/page/N/`
+    does — confirmed live, page 2/3 return genuinely older content
+    (page 1 all September, page 2/3 all August). Real listing items are
+    `<li class="wp-block-post ...">` with a `<time datetime="...">` —
+    excludes the site's own "Featured" nav-menu links, which reuse the
+    same URL pattern but sit in an unrelated `wp-block-whitehouse-
+    header__menu-feature` container. Reuses process_whitehouse_item_by_
+    url() (previously backtest.py-only).
+    """
+    client = make_client()
 
-    log.info(f"[whitehouse] {rss_url}")
-    resp = fetch(client, rss_url)
-    if not resp:
-        log.error("[whitehouse] Failed to fetch RSS")
+    raw_items: list[tuple[date, str, str]] = []
+    for page in range(1, _WHITEHOUSE_PAGE_LIMIT + 1):
+        list_url = (
+            "https://www.whitehouse.gov/news/" if page == 1
+            else f"https://www.whitehouse.gov/news/page/{page}/"
+        )
+        log.info(f"[whitehouse] {list_url}")
+        resp = fetch(client, list_url)
+        if not resp:
+            log.error(f"[whitehouse] Failed to fetch {list_url}")
+            break
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        page_items: list[tuple[date, str, str]] = []
+        for li in soup.find_all("li", class_="wp-block-post"):
+            a = li.find("a", href=True)
+            time_tag = li.find("time", datetime=True)
+            if not a or not time_tag:
+                continue
+            try:
+                item_date = datetime.fromisoformat(time_tag["datetime"]).date()
+            except ValueError:
+                continue
+            title = a.get_text(strip=True)
+            if title:
+                page_items.append((item_date, a["href"], title))
+
+        if not page_items:
+            break
+        raw_items.extend(page_items)
+
+        oldest_on_page = min(d for d, _, _ in page_items)
+        if _RUN_TARGET_START is not None and oldest_on_page < _RUN_TARGET_START:
+            log.info(f"[whitehouse] Reached {oldest_on_page} on page {page}, "
+                     f"before this run's target start ({_RUN_TARGET_START}) — "
+                     f"stopping (list is newest-first, so everything after "
+                     f"this is even older).")
+            break
+
+    if not raw_items:
+        log.error("[whitehouse] Found nothing on the news listing at all")
         return
 
-    items     = parse_rss(resp.text)
-    new_items = [it for it in items if not is_seen(conn, item_url(it))]
+    new_items: list[tuple[str, str, date]] = []
+    for item_date, href, title in raw_items:
+        if _RUN_TARGET_START is not None and item_date < _RUN_TARGET_START:
+            continue
+        if not is_seen(conn, href):
+            new_items.append((href, title, item_date))
+    new_items = new_items[:MAX_NEW_ITEMS_PER_RUN]
     log.info(f"[whitehouse] {len(new_items)} new items")
 
-    for it in new_items:
-        url = item_url(it)
+    for url, title, item_date in new_items:
         with _isolate_item_errors("whitehouse", url):
-            title = item_title(it)
-            raw_content = item_content(it)
-            plain = BeautifulSoup(raw_content, "html.parser").get_text()
-            plain = _resolve_pdf_stub(client, raw_content, plain, url)
-            process_release_common("whitehouse", url, title, item_date(it), plain,
-                                    "White House", model, conn)
+            process_whitehouse_item_by_url(
+                url, title, datetime(item_date.year, item_date.month, item_date.day),
+                model, conn, client,
+            )
 
 
 # ── Source: Treasury ──────────────────────────────────────────────────────────

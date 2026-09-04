@@ -4872,3 +4872,64 @@ them for real needs actual investigation (a different real endpoint, a
 cache-busting approach, or confirming there's genuinely no deeper
 archive available), not a mechanical copy of SCIO/MND's fix. Not done
 this session — a deliberate, scoped follow-up, not an oversight.
+
+2026-09-04 continued — followed up on state.gov/treasury/whitehouse
+per direct user request ("is there no way to look at page 2"). Dug
+past the query-string dead end from the earlier entry:
+
+- **state.gov**: its API sits behind a CloudFront cache keyed on PATH
+  ONLY — confirmed live via response headers (`x-cache: Hit from
+  cloudfront`, identical `x-wp-total`/content across `?page=N`, a
+  random cache-busting param, `?search=china`, `?before=...`, all of
+  it). But the real public `state.gov/press-releases/page/N/` (a path,
+  not a query string) isn't subject to the same collapsing — confirmed
+  live, genuinely different/older content per page. Real structure:
+  `<li class="collection-result">` with `.collection-result__link`
+  (url+title) and `.collection-result-meta span` (date, "Month D,
+  YYYY").
+- **whitehouse.gov**: same fix shape. `/news/page/N/` (not the RSS
+  feed, which has no "page 2" concept at all) returns genuinely older
+  content — confirmed live, page 1 all September, pages 2-3 all
+  August. Real structure: `<li class="wp-block-post ...">` with a
+  `<time datetime="ISO8601">` — has to exclude the site's own
+  "Featured" nav-menu links, which reuse the same URL pattern but sit
+  in an unrelated `wp-block-whitehouse-header__menu-feature` container
+  (filtering by the `wp-block-post` li class handles this cleanly).
+- **treasury**: genuine dead end, not just unexplored. Its listing page
+  is a STATIC FILE served from S3/CloudFront — confirmed via
+  `x-amz-meta-mtime` being byte-identical no matter what URL/query is
+  requested, including a guessed `/page/2` path (404s). The "Page2"/
+  "Page3" links visible in its HTML must be handled by client-side JS
+  hitting some API this session couldn't find by guessing (tried the
+  standard Drupal JSON:API path, 404). Real pagination here would need
+  an actual browser executing that JS — the exact capability
+  (Playwright) this project deliberately dropped 2026-08-04. Left
+  as-is; flagged as a real, scoped decision for later, not silently
+  skipped.
+
+Rewrote `scrape_state()` and `scrape_whitehouse()` to discover through
+these real archive pages instead of the WP-JSON API / RSS feed,
+mirroring SCIO/MND's proven pagination shape (walk pages newest-first,
+stop once a page's oldest item is before `_RUN_TARGET_START`, capped
+at `_STATE_PAGE_LIMIT`/`_WHITEHOUSE_PAGE_LIMIT` = 15 pages). Both reuse
+`process_state_item_by_url()`/`process_whitehouse_item_by_url()` —
+previously backtest.py-only fetch-by-URL variants that already did
+exactly "fetch, extract text, run through process_release_common,"
+now doing double duty as the real per-item processor for live runs too.
+
+Verified live, not just by reading the diff: pointed `scrape_state()`
+at Aug 25-31 (the exact week that had scrolled off state.gov's API
+entirely) — it correctly paginated 4 pages deep and found 14 real,
+previously-unreachable items before stopping right at the target
+boundary. Did the same discovery-only check for whitehouse against the
+same week: 17 real items found, page 1 all August 31, page 3 correctly
+reaching back to Aug 21. Only 1 of those 17 was already in the
+database from earlier work — the other 16 are genuinely new content
+this pipeline could never have found before today's fix, on a source
+this session had already run against MANY times without ever noticing
+the gap (RSS feeds don't announce what they're missing).
+
+Ran the full suite after the rewrite: 134 tests, all still green (this
+touches live-network discovery logic no unit test exercises directly,
+which is exactly why the live pagination checks above mattered more
+than the suite here).
