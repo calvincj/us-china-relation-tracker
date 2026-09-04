@@ -4481,3 +4481,49 @@ at import time); both are already covered by the existing `logs/`/
 `output/` .gitignore patterns either way, so this was tidiness, not a
 bug fix. Re-ran the full test suite after all of the above: 129 tests,
 all green.
+
+2026-09-04: user's worker reported a real 404 — "This model
+models/gemini-2.5-flash is no longer available to new users." — meaning
+Google retired the model this whole pipeline was built on. Verified
+live rather than trusting the error message's suggested replacement at
+face value: called `client.models.list()` with the real API key and
+confirmed `gemini-3.6-flash` is a real, current, non-preview model
+(matches what the error suggested). Migrated `GEMINI_MODEL` in
+`scraper.py` and `_GEMINI_MODEL` in `format_entry.py` to it, then
+re-verified the whole call path live with a real `classify_relevance()`
+call before considering it done.
+
+Two things changed with the new model, both found live, not assumed:
+
+1. **Thinking can no longer be fully disabled.** The old model
+   (`gemini-2.5-flash`) supported `thinking_budget=0` to turn off its
+   invisible chain-of-thought entirely — a real cost fix from earlier
+   this project. `gemini-3.6-flash` rejects `thinking_budget=0` outright
+   with a 400 INVALID_ARGUMENT (confirmed live). Tried budgets of
+   1/128/512/1024 live too — all produced roughly the same ~80-100
+   hidden thinking tokens regardless of the requested budget, so there's
+   no real way left to avoid this overhead; it now behaves like
+   `gemini-2.5-pro` always did (a mandatory minimum). Kept
+   `thinking_budget=1` (the smallest legal value) since it's harmless,
+   but flagged in the code comment that it doesn't measurably help.
+
+2. **Real price increase.** Checked
+   https://ai.google.dev/gemini-api/docs/pricing live: gemini-3.6-flash
+   is $0.75/M input, $3.75/M output through 2026-12-31 (then $1.50/$7.50
+   starting 2027-01-01) — vs. the retired model's $0.30/$2.50. That's
+   2.5x on input and 1.5x on output, before even counting the new
+   unavoidable thinking-token overhead from #1. Updated
+   `_USD_PER_MILLION["Gemini"]` to match so the run-end cost estimate
+   stays accurate, and left a comment flagging the 2027-01-01 step-up to
+   revisit later. Did not touch the README's illustrative example run
+   summary (the "$0.26" line) — it's a format example, not a real
+   post-migration measurement, and fabricating a new precise-looking
+   number without an actual timed run to back it up would be worse than
+   leaving it as an example. A real run after this migration will show
+   the true new cost/time.
+
+Ran the full test suite again after this migration: 129 tests, all
+green (none of them call the real API, so this doesn't exercise the
+live-model change itself — that was checked separately via the real
+`classify_relevance()` call above, per this project's standing rule of
+verifying against live data rather than assuming).

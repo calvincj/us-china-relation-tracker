@@ -535,19 +535,29 @@ def flag_for_review(url: str, title: str, reason: str) -> None:
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
+# Migrated from gemini-2.5-flash 2026-09-04: Google retired it for this
+# account ("This model models/gemini-2.5-flash is no longer available to
+# new users"), a real 404 reported live by the user's worker. Confirmed
+# via client.models.list() which model to move to (matches Google's own
+# error message) and checked pricing at
+# https://ai.google.dev/gemini-api/docs/pricing (checked 2026-09-04):
+# gemini-3.6-flash is $0.75/M input, $3.75/M output through 2026-12-31,
+# rising to $1.50/$7.50 on 2027-01-01 — noticeably pricier than
+# gemini-2.5-flash's $0.30/$2.50 (2.5x input, 1.5x output). Re-check
+# _USD_PER_MILLION below after 2027-01-01 for the price step-up.
 
-# gemini-2.5-flash is a "thinking" model by default — same invisible-
-# chain-of-thought cost as GROQ_MODEL's reasoning_effort issue, confirmed
-# live via the new [usage] logging (2026-09-01): a plain YES/NO
-# classify_relevance call spent 358 of 395 non-prompt tokens (91%) on
-# hidden thinking never surfaced to the caller. Unlike gemini-2.5-pro
-# (which requires a minimum thinking budget), flash supports
-# thinking_budget=0 to disable it outright — every call this pipeline
-# makes (classify/translate/extract/summarize) is a straightforward
-# transform task that doesn't need deliberation, exactly the same
-# reasoning behind Groq's reasoning_effort="low". Mirrors that fix.
-_GEMINI_THINKING_CONFIG = types.ThinkingConfig(thinking_budget=0)
+# gemini-2.5-flash was a "thinking" model by default that could be fully
+# disabled with thinking_budget=0 — see the fuller history in NOTES.md.
+# gemini-3.6-flash does NOT support that: thinking_budget=0 is rejected
+# outright with a 400 INVALID_ARGUMENT (confirmed live, 2026-09-04, same
+# day as the model migration above). It behaves like gemini-2.5-pro
+# always did — a minimum amount of thinking is mandatory. Tried budgets
+# of 1/128/512/1024 live and all produced roughly the same ~80-100
+# thinking tokens regardless, so there's no real lever left to pull here;
+# thinking_budget=1 (the smallest legal value) is kept only to signal
+# intent, not because it measurably reduces spend.
+_GEMINI_THINKING_CONFIG = types.ThinkingConfig(thinking_budget=1)
 
 # Groq retired llama-3.3-70b-versatile from this account's available models
 # sometime between 2026-08-04 and 2026-08-05 — the fallback path started
@@ -578,14 +588,18 @@ USAGE_LOG_PATH = os.path.join(DATA_DIR, "usage_log.jsonl")
 # a non-free OpenRouter model). Cerebras omitted — never successfully
 # billed a call (402 Payment Required all session).
 # Source: https://ai.google.dev/gemini-api/docs/pricing (checked
-# 2026-09-01) — gemini-2.5-flash: $0.30/M input, $2.50/M output, and
-# "thinking" tokens are billed at the OUTPUT rate, not a separate premium.
+# 2026-09-04, after the gemini-3.6-flash migration above) —
+# gemini-3.6-flash: $0.75/M input, $3.75/M output through 2026-12-31,
+# rising to $1.50/$7.50 on 2027-01-01. "Thinking" tokens are billed at
+# the OUTPUT rate, not a separate premium. (Was $0.30/$2.50 under the
+# retired gemini-2.5-flash, checked 2026-09-01 — kept here for context
+# on why costs look different from earlier runs' [usage] logs.)
 # XAI (grok-4.3) pricing from https://docs.x.ai/docs/models/grok-4.3
 # (checked 2026-09-01): $1.25/M input, $2.50/M output for requests under
 # 200K prompt tokens (our snippets never get remotely close) — real money,
 # the user's repurposed-xAI-key credit.
 _USD_PER_MILLION = {
-    "Gemini":     {"input": 0.30, "output": 2.50},
+    "Gemini":     {"input": 0.75, "output": 3.75},
     "Groq":       {"input": 0.0,  "output": 0.0},
     "OpenRouter": {"input": 0.0,  "output": 0.0},
     "XAI":        {"input": 1.25, "output": 2.50},

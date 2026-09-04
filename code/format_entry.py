@@ -38,7 +38,10 @@ from scraper import (
 # Gemini free tier: 15 RPM. A manual run makes 2-3 calls, so 2s between
 # calls keeps us safely under the rolling-window limit.
 _GEMINI_SLEEP = 2.0
-_GEMINI_MODEL = "gemini-2.5-flash"
+# gemini-2.5-flash was retired for this account 2026-09-04 (see
+# scraper.py's GEMINI_MODEL comment for the full story); kept in sync
+# with that same replacement model.
+_GEMINI_MODEL = "gemini-3.6-flash"
 
 
 def _call_gemini(client, prompt: str, retries: int = 2) -> str:
