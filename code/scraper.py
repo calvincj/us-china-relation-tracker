@@ -255,7 +255,35 @@ KNOWN_NAME_ROMANIZATIONS = {
 # plurals are at least as common as the singular in real headlines, so
 # this was a real regression traded for the earlier fix, caught only by
 # the test suite, not by the live testing that found the original bug.
-_RELEVANCE_ALTERNATIVES = (
+# Split into three parts, 2026-09-04, per direct user request: real
+# frequency analysis of all 4 past-tracker documents (8074 bold summary
+# lines, plus a second full-paragraph scan) showed the "maybe" (LLM-
+# judged) keyword list was NOT symmetric between the two directions —
+# China-side rhetoric describing the US and US-side rhetoric describing
+# China use almost entirely different vocabulary in practice (e.g.
+# "coercion" appeared 97 times describing the US, "overcapacity" 52 times
+# describing China — near-zero overlap the other way). Keeping one merged
+# list meant every classify_relevance() call carried both sides' terms
+# regardless of which direction actually applied — split into:
+#   _SHARED_RELEVANCE_ALTERNATIVES — genuinely bidirectional terms (either
+#     side uses these: tariffs, export controls, NATO, decoupling, etc.)
+#   _US_DESCRIBING_CHINA_ALTERNATIVES — terms that, in practice, are
+#     overwhelmingly used BY the US side ABOUT China
+#   _CHINA_DESCRIBING_US_ALTERNATIVES — terms that, in practice, are
+#     overwhelmingly used BY the China side ABOUT the US
+# `_RELEVANCE_ALTERNATIVES` below is kept as the union of all three for
+# backward compatibility — it still backs RELEVANCE_KEYWORDS and the
+# original (direction-agnostic) US_SOURCE_RELEVANCE_KEYWORDS, both of
+# which are used ONLY for snippet-WINDOWING (deciding where to center a
+# chunk of text sent to the LLM in generate_summary/extract_key_
+# paragraphs), never for the actual relevance decision — being
+# direction-agnostic there is harmless (a wider net for picking a window
+# doesn't hurt; the explicit-mention/LLM checks downstream do the real
+# judgment). The actual per-direction PRE-FILTER used by
+# classify_relevance() is built further down, after _EXPLICIT_CHINA_
+# MENTION_RE is defined (see _CHINA_DIRECTION_KEYWORDS/_US_DIRECTION_
+# KEYWORDS below).
+_SHARED_RELEVANCE_ALTERNATIVES = (
     # US references — "America[n]" excludes "Latin/South/Central America"
     # (a region, not the US) via negative lookbehind, added 2026-09-02
     # after a real false positive: a Latin America item got matched and
@@ -320,6 +348,46 @@ _RELEVANCE_ALTERNATIVES = (
     # Other recurring topics
     r"|fentanyl|espionage|intellectual property|forced transfers?"
     r"|NATO|G7|G20|QUAD|AUKUS|decoupling|de-risk"
+    r"|strategic competition"  # confirmed missing live, 2026-09-04, per user request
+)
+
+# Terms overwhelmingly used BY THE US SIDE to describe/characterize China
+# — found via a real frequency scan of all 4 past-tracker documents,
+# 2026-09-04: overcapacity (52 occurrences describing China), unfair
+# trade practices (13), intellectual property theft (13), non-market
+# economy (11), predatory (11), malign influence (7), military-civil
+# fusion (6), state-owned enterprises, debt trap (3) — real evidence for
+# the asymmetry the user's instinct flagged. Kept short/specific per the
+# same request (don't balloon the "maybe" list and raise cost for little
+# recall gain) — generic terms like bare "trade"/"technology transfer"/
+# "currency manipulation" stay in the SHARED list above; only the more
+# specific US-characterizing-China phrasings live here. "Forced
+# technology transfer" isn't repeated here — already covered by the
+# shared list's "technology transfers?".
+_US_DESCRIBING_CHINA_ALTERNATIVES = (
+    r"overcapacity|non-market econom(?:y|ies)|state-owned enterprises?"
+    r"|military-civil fusion|debt traps?|malign influence"
+    r"|predatory|unfair trade practices"
+)
+
+# Terms overwhelmingly used BY THE CHINA SIDE to describe/characterize the
+# US — same 2026-09-04 scan: coercion (97), smear (80), bullying (70),
+# protectionism (70), unilateralism (55), double standard (23), zero-sum
+# (20), long-arm jurisdiction (21), suppression (17), Cold War mentality
+# (10), hegemonism (7), containment (7), interference in internal affairs
+# (6) — this is the more frequently-used side of the asymmetry in
+# practice (FMPRC/MOFCOM spokespeople reach for this rhetoric routinely).
+_CHINA_DESCRIBING_US_ALTERNATIVES = (
+    r"coercions?|smears?|bully(?:ing)?|protectionism|unilateralism"
+    r"|double standards?|zero-sum|long-arm jurisdiction|suppression"
+    r"|Cold War mentality|hegemonism|containment"
+    r"|interference in (?:China's )?internal affairs"
+)
+
+_RELEVANCE_ALTERNATIVES = (
+    _SHARED_RELEVANCE_ALTERNATIVES
+    + "|" + _US_DESCRIBING_CHINA_ALTERNATIVES
+    + "|" + _CHINA_DESCRIBING_US_ALTERNATIVES
 )
 RELEVANCE_KEYWORDS = re.compile(rf"\b(?:{_RELEVANCE_ALTERNATIVES})\b", re.IGNORECASE)
 
@@ -371,6 +439,20 @@ _EXPLICIT_US_MENTION_RE = re.compile(
     r"\b(?:U\.S(?!\.?\s*dollars?\b)\b|(?-i:US)(?!\s*dollars?\b)\b"
     r"|United States(?!\s+dollars?\b)"
     r"|(?<!Latin )(?<!South )(?<!Central )America[n]?|Washington"
+    # "D.C." — checked live before adding: a bare trailing \b after the
+    # literal period fails to match "D.C." followed by a space/comma/
+    # end-of-string at all (the position right after "." is between two
+    # non-word characters, never a real \b transition), so this uses the
+    # same "match up to the last word character, don't require \b past a
+    # trailing period" trick the existing "U.S" alternative above already
+    # relies on — "D\.C\b" (matching just through the "C") rather than
+    # "D\.C\." (which would silently never match). Entity additions below
+    # (White House, State Dept, etc.) all end in ordinary letters, so the
+    # outer closing \b at the end of this whole group works fine for them
+    # with no special handling needed.
+    r"|D\.C\b|White House|State Department"
+    r"|Department of Commerce|Department of the Treasury"
+    r"|Department of Defense|Department of War|National Security Council"
     # Kept in sync with _HALLUCINATION_CHECK_SURNAMES — found live,
     # 2026-09-04, that this list had drifted out of sync with it: Greer,
     # Vance, Perdue, Hegseth, Gabbard, Ratcliffe, Leavitt, and Miller
@@ -1132,7 +1214,60 @@ _EXPLICIT_CHINA_MENTION_RE = re.compile(
     # positive-avoidance reasoning as "Stephen Miller" on the US side
     # (a bare "Wang" or "He" would be far too common/ambiguous to gate
     # auto-inclusion on).
-    r"|Wang Yi|He Lifeng)\b",
+    r"|Wang Yi|He Lifeng"
+    # "Foreign Ministry"/"State Council" (institutions), plus more named
+    # spokespeople/officials, added 2026-09-04 per direct user request —
+    # real occurrence counts from a full 4-tracker scan: Foreign Ministry
+    # (251), Guo Jiakun (495), Lin Jian (415), Mao Ning (292), State
+    # Council (28), Zhang Xiaogang (50), Li Qiang (9). Han Zheng and Wang
+    # Wentao had lower counts in that sample (2 and 1) but are the
+    # sitting Vice Premier and Commerce Minister respectively — included
+    # for the same reason as Wang Yi/He Lifeng above (real senior
+    # officials this tracker already tracks by name), not because the
+    # sample counts alone would justify it; low mention frequency in
+    # past trackers reflects how often FMPRC/MOFCOM readouts named them
+    # personally rather than by title, not how important they are. All
+    # given as full names for the same false-positive-avoidance reasoning
+    # as "Stephen Miller"/"Wang Yi" above.
+    r"|Foreign Ministry|State Council"
+    r"|Li Qiang|Han Zheng|Wang Wentao|Guo Jiakun|Lin Jian|Mao Ning|Zhang Xiaogang"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Direction-specific pre-filter for classify_relevance()'s free keyword
+# gate — added 2026-09-04 alongside the shared/asymmetric list split
+# above, fixing a REAL LATENT BUG found live while doing that split: the
+# original single pre-filter (US_SOURCE_RELEVANCE_KEYWORDS, built from
+# _RELEVANCE_ALTERNATIVES plus a bare China/Beijing/Xi Jinping check) did
+# NOT cover every term in _EXPLICIT_CHINA_MENTION_RE/_EXPLICIT_US_MENTION_
+# RE above — "PRC", "Ministry of Commerce", "Wang Yi", and "He Lifeng"
+# (China side) were all absent from the pre-filter, and so would every
+# US-side entity just added above have been. Since the pre-filter runs
+# FIRST and returns False (no LLM call, no explicit check) before the
+# explicit-mention tier ever runs, an item whose ONLY signal was one of
+# those terms was silently rejected before the explicit-mention check got
+# a chance to auto-include it. Confirmed live before this fix: "The PRC
+# issued a statement," "The Ministry of Commerce released a list," "Wang
+# Yi met with officials," and "He Lifeng attended the summit" ALL failed
+# the old pre-filter outright — a real, silent false-negative bug from
+# earlier today's own explicit-list expansion work, not a hypothetical.
+#
+# Fixed by building each direction's pre-filter as the OR of that
+# direction's shared+asymmetric keyword alternatives AND its own
+# _EXPLICIT_*_MENTION_RE pattern — this makes the pre-filter a superset
+# of the explicit check BY CONSTRUCTION (referencing the already-compiled
+# pattern, not a separately-typed-out copy of its terms), so this class
+# of bug cannot recur even if the explicit lists grow again later without
+# someone remembering to update the pre-filter to match.
+_CHINA_DIRECTION_KEYWORDS = re.compile(
+    rf"\b(?:{_SHARED_RELEVANCE_ALTERNATIVES}|{_US_DESCRIBING_CHINA_ALTERNATIVES})\b"
+    rf"|{_EXPLICIT_CHINA_MENTION_RE.pattern}",
+    re.IGNORECASE,
+)
+_US_DIRECTION_KEYWORDS = re.compile(
+    rf"\b(?:{_SHARED_RELEVANCE_ALTERNATIVES}|{_CHINA_DESCRIBING_US_ALTERNATIVES})\b"
+    rf"|{_EXPLICIT_US_MENTION_RE.pattern}",
     re.IGNORECASE,
 )
 
@@ -1177,7 +1312,13 @@ def classify_relevance(
     so this doesn't change the free/no-LLM-call fast path, only the
     judgment once an LLM call happens).
     """
-    keyword_hit = US_SOURCE_RELEVANCE_KEYWORDS.search(text)
+    # Direction-specific pre-filter (see _CHINA_DIRECTION_KEYWORDS/
+    # _US_DIRECTION_KEYWORDS above) — NOT the old shared US_SOURCE_
+    # RELEVANCE_KEYWORDS, which is kept around only for windowing
+    # elsewhere and is not guaranteed to cover every explicit-mention
+    # term (see the bug this fixed, documented above those patterns).
+    prefilter_re = _US_DIRECTION_KEYWORDS if chinese_origin else _CHINA_DIRECTION_KEYWORDS
+    keyword_hit = prefilter_re.search(text)
     if not keyword_hit:
         return False, "Keyword pre-filter: no US-China-relevant terms found — skipped LLM call."
 

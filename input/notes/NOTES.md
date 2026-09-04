@@ -5405,3 +5405,119 @@ Added 14 more regression tests covering all of the above (the new
 keyword terms, the new officials, and — importantly — the negative
 cases proving the risky bare-surname forms do NOT match). Ran the full
 suite: 174 tests, all green.
+
+## 2026-09-04 (later same day): split the "maybe" keyword list by direction, more explicit officials/entities, and a real pre-filter bug caught while doing it
+
+User pushed back on the shared "maybe" (LLM-judged) keyword list from
+the entry above: "the maybe shouldn't be the same for both man,
+consider priorities, there should be terms that one term uses more
+often to describe other" — plus a request to add D.C./America/more
+official names to the explicit tier, and to check whether "strategic
+competition" was covered.
+
+**Verified the concrete gaps live before touching anything:**
+"strategic competition" — NOT in the keyword list. "D.C." — NOT in
+`_EXPLICIT_US_MENTION_RE`. Bare "America" (no South/Latin/Central
+prefix) — already matched correctly, no gap there.
+
+**Real evidence for the split, not a guess:** scanned all 4 past-
+tracker documents twice — once for bold summary lines (8074 of them,
+for entity/official frequency), once across all paragraphs
+specifically for the asymmetric-rhetoric hypothesis. Real counts:
+China-describing-US rhetoric — coercion (97), smear (80), bullying
+(70), protectionism (70), unilateralism (55), double standard (23),
+zero-sum (20), long-arm jurisdiction (21), suppression (17), Cold War
+mentality (10), hegemonism (7), containment (7), interference in
+internal affairs (6). US-describing-China rhetoric — overcapacity
+(52), unfair trade practices (13), intellectual property theft (13),
+non-market (11), predatory (11), malign influence (7), military-civil
+fusion (6), forced technology transfer (6), currency manipulation (5),
+debt trap (3). Confirms the user's instinct: almost no overlap between
+the two directions in real usage.
+
+**Implemented the split** in `code/scraper.py`: `_RELEVANCE_ALTERNATIVES`
+(the old shared list) became `_SHARED_RELEVANCE_ALTERNATIVES` (added
+"strategic competition" here — bidirectional, either side uses it),
+plus two new lists, `_US_DESCRIBING_CHINA_ALTERNATIVES` and
+`_CHINA_DESCRIBING_US_ALTERNATIVES`, holding only the well-evidenced
+terms above (kept short/specific per the user's earlier "don't include
+'import'" cost-consciousness request — generic overlapping terms like
+"trade"/"technology transfer" stay in the shared list rather than being
+duplicated). `_RELEVANCE_ALTERNATIVES` itself is kept as the union of
+all three, so `RELEVANCE_KEYWORDS`/`US_SOURCE_RELEVANCE_KEYWORDS` — both
+confirmed by grep to be used ONLY for snippet windowing elsewhere
+(`generate_summary`, `extract_key_paragraphs`), never for the actual
+relevance decision — stay backward compatible and unchanged in behavior.
+
+**Added to `_EXPLICIT_US_MENTION_RE`:** D.C., White House, State
+Department, Department of Commerce, Department of the Treasury,
+Department of Defense, Department of War, National Security Council —
+all backed by real occurrence counts from the frequency scan (White
+House 98, State Department 67, D.C. 18, Dept of Commerce 11, Dept of
+Defense 11, Dept of the Treasury 7, Dept of War 6, NSC 6).
+
+**Added to `_EXPLICIT_CHINA_MENTION_RE`:** Foreign Ministry (251), State
+Council (28), Li Qiang (9), Guo Jiakun (495), Lin Jian (415), Mao Ning
+(292), Zhang Xiaogang (50) — plus Han Zheng and Wang Wentao despite
+lower sample counts (2 and 1): they're the sitting Vice Premier and
+Commerce Minister, real senior officials this tracker already tracks
+by title, and the low sample count just reflects how often past
+FMPRC/MOFCOM readouts named them personally vs. by title, not their
+actual importance. All as full names, same false-positive-avoidance
+reasoning as "Stephen Miller"/"Wang Yi" already in place.
+
+**Caught a real regex boundary bug before shipping "D.C.":** the whole
+`_EXPLICIT_US_MENTION_RE` group ends in a single shared closing `\b`.
+A naive `D\.C\.` alternative relying on that shared `\b` NEVER matches
+"D.C." followed by a space/comma/end-of-string — tested live and
+confirmed (`D\.C\.` matched 0 of 4 realistic test sentences). The
+position right after a literal "." is between two non-word characters
+whenever what follows is whitespace/punctuation, so `\b` can't fire
+there. Fixed using the same trick the existing "U.S" alternative
+already relies on: match only through the final letter (`D\.C\b`,
+not `D\.C\.`) so the boundary lands on a real word character. Verified
+live against all 4 test cases before moving on, not just assumed fixed.
+
+**The real bug of this round, found BY doing the split, not looked for
+on its own:** while restructuring, checked whether the pre-filter that
+runs BEFORE the two-tier explicit-mention gate (added earlier today)
+actually covers everything the explicit-mention regexes do — it did
+not. `US_SOURCE_RELEVANCE_KEYWORDS` (built from `_RELEVANCE_ALTERNATIVES`
+plus a bare China/Beijing/Xi Jinping check) never included "PRC",
+"Ministry of Commerce", "Wang Yi", or "He Lifeng" — all four already
+live in `_EXPLICIT_CHINA_MENTION_RE` from earlier today's work. Since
+the pre-filter runs first and returns False (no LLM call, no explicit
+check reached at all) before the explicit tier ever runs, an item
+whose ONLY signal was one of those four terms was being silently
+rejected — confirmed live before the fix: "The PRC issued a
+statement," "The Ministry of Commerce released a list," "Wang Yi met
+with officials," and "He Lifeng attended the summit" ALL failed the
+old pre-filter outright. This was a real, silent false-negative
+regression introduced by this SAME session's earlier explicit-list
+work, caught only because restructuring the keyword lists forced a
+line-by-line re-check of what actually feeds `classify_relevance`'s
+pre-filter versus what it's supposed to auto-include.
+
+Fixed by building two new direction-specific pre-filters,
+`_CHINA_DIRECTION_KEYWORDS`/`_US_DIRECTION_KEYWORDS`, each as the
+shared+asymmetric keyword alternatives OR'd with that direction's own
+already-compiled `_EXPLICIT_*_MENTION_RE.pattern` — referencing the
+compiled pattern directly, not retyping its terms, so the pre-filter
+is a superset of the explicit check BY CONSTRUCTION and this exact
+class of bug can't quietly recur the next time the explicit list
+grows. Wired into `classify_relevance()` in place of the old
+`US_SOURCE_RELEVANCE_KEYWORDS.search(text)` line. Verified live: all
+4 previously-broken cases now pass their direction's pre-filter, and
+the pre-existing behavior (Latin America exclusion, bare "US" without
+periods, lowercase "us" pronoun exclusion, South/East China Sea) all
+still hold with no regression.
+
+Added 21 new regression tests: US/China entity-and-official additions,
+the D.C. boundary-bug fix (including the specific 4 sentences that
+proved the naive version broken), the asymmetric-list terms on both
+sides, and a new `TestDirectionSpecificPrefilter` class covering both
+the 4 concretely-broken cases and a generic "every explicit-mention
+term must pass its direction's pre-filter" invariant test, so this
+holds even as the explicit lists keep growing. Ran the full suite:
+185 tests, all green. Cleaned up stray `code/logs`/`code/output` test
+artifacts afterward.

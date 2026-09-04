@@ -164,6 +164,12 @@ class TestKeywordsAddedFromPastTrackerResearch(unittest.TestCase):
     def test_de_minimis_matches(self):
         self.assertIsNotNone(S.RELEVANCE_KEYWORDS.search("closing the de minimis exemption loophole"))
 
+    def test_strategic_competition_matches(self):
+        # Confirmed missing live, 2026-09-04, per direct user request.
+        self.assertIsNotNone(
+            S.RELEVANCE_KEYWORDS.search("this reflects broader strategic competition between the two powers")
+        )
+
     def test_plural_forms_of_singular_keywords_still_match(self):
         # Adding the trailing \b above (to fix the AI/aircraft bug) also
         # silently broke ordinary plurals of the affected single-word
@@ -253,6 +259,46 @@ class TestKeywordsAddedFromPastTrackerResearch(unittest.TestCase):
                 "China exported 810 billion US dollars worth of goods."
             )
         )
+
+
+class TestAsymmetricRelevanceLists(unittest.TestCase):
+    """
+    _US_DESCRIBING_CHINA_ALTERNATIVES / _CHINA_DESCRIBING_US_ALTERNATIVES
+    — added 2026-09-04 per direct user request, splitting the previously
+    shared "maybe" keyword list based on a real frequency scan of all 4
+    past-tracker documents showing the two directions use almost
+    entirely different rhetoric in practice.
+    """
+
+    def test_us_describing_china_terms_match(self):
+        for text in [
+            "China has significant overcapacity in steel production.",
+            "Chinese state-owned enterprises dominate the sector.",
+            "The report cites military-civil fusion concerns.",
+            "Officials called it a debt trap.",
+            "Beijing was accused of malign influence operations.",
+            "This is a predatory lending practice.",
+            "The US cited unfair trade practices.",
+            "Analysts pointed to China's non-market economy status.",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNotNone(S.RELEVANCE_KEYWORDS.search(text))
+
+    def test_china_describing_us_terms_match(self):
+        for text in [
+            "China accused the US of coercion.",
+            "Officials called it a smear campaign.",
+            "This is unilateralism at its worst, the spokesperson said.",
+            "A clear double standard, the ministry said.",
+            "This reflects zero-sum thinking.",
+            "Long-arm jurisdiction was cited as the issue.",
+            "This is Cold War mentality, Beijing said.",
+            "Hegemonism was condemned by the spokesperson.",
+            "Containment policy was criticized.",
+            "This constitutes interference in China's internal affairs.",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNotNone(S.RELEVANCE_KEYWORDS.search(text))
 
 
 class TestExplicitUsMention(unittest.TestCase):
@@ -348,6 +394,41 @@ class TestExplicitUsMention(unittest.TestCase):
         # completely unrelated content. Full name only.
         self.assertIsNotNone(S._EXPLICIT_US_MENTION_RE.search("Stephen Miller addressed reporters."))
         self.assertIsNone(S._EXPLICIT_US_MENTION_RE.search("a Miller classic played at the event"))
+
+    def test_matches_dc_added_2026_09_04(self):
+        # Real gap found live per direct user request: "D.C." with no
+        # "Washington" nearby fell through to LLM judgment. A naive
+        # "D\.C\.\b" was tested and confirmed to NEVER match (the trailing
+        # \b can't be satisfied right after a literal period followed by
+        # whitespace/punctuation) — the fix mirrors the existing "U.S"
+        # alternative's own style, matching only through the final letter.
+        for text in ["He is in D.C. today.", "officials met in D.C.,",
+                     "D.C. is the capital", "a trip to D.C."]:
+            with self.subTest(text=text):
+                self.assertIsNotNone(S._EXPLICIT_US_MENTION_RE.search(text))
+
+    def test_matches_us_entities_added_2026_09_04(self):
+        # Real occurrence counts from a full 4-tracker scan, per direct
+        # user request: White House (98), State Department (67), Dept of
+        # Commerce (11), Dept of the Treasury (7), Dept of Defense (11),
+        # Dept of War (6), National Security Council (6).
+        for text in [
+            "The White House released a statement.",
+            "The State Department issued new guidance.",
+            "The Department of Commerce announced tariffs.",
+            "The Department of the Treasury sanctioned several firms.",
+            "The Department of Defense briefed reporters.",
+            "The Department of War released a report.",
+            "The National Security Council convened today.",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNotNone(S._EXPLICIT_US_MENTION_RE.search(text))
+
+    def test_bare_america_without_region_prefix_matches(self):
+        # Confirmed live per direct user request: bare "America" (no
+        # South/Latin/Central prefix) already matched correctly before
+        # this round's changes — verifying no regression, not a new gap.
+        self.assertIsNotNone(S._EXPLICIT_US_MENTION_RE.search("America imposed new tariffs today."))
 
 
 class TestClassifyByLabels(unittest.TestCase):
@@ -1654,6 +1735,99 @@ class TestExplicitChinaMentionRe(unittest.TestCase):
                 "controls, semiconductors, chips, decoupling, and de-risking "
                 "between the United States and various trading partners.")
         self.assertIsNone(S._EXPLICIT_CHINA_MENTION_RE.search(text))
+
+    def test_matches_institutions_and_officials_added_2026_09_04(self):
+        # Real occurrence counts from a full 4-tracker scan, per direct
+        # user request: Foreign Ministry (251), Guo Jiakun (495), Lin
+        # Jian (415), Mao Ning (292), State Council (28), Zhang Xiaogang
+        # (50), Li Qiang (9). Han Zheng/Wang Wentao had lower sample
+        # counts but are the sitting Vice Premier/Commerce Minister —
+        # included for the same "real senior official" reasoning as
+        # Wang Yi/He Lifeng above, not on frequency alone.
+        for text in [
+            "Foreign Ministry spokesperson Lin Jian said today.",
+            "The State Council issued a white paper.",
+            "Premier Li Qiang met with business leaders.",
+            "Vice Premier Han Zheng attended the forum.",
+            "Commerce Minister Wang Wentao signed the agreement.",
+            "Spokesperson Guo Jiakun responded to the question.",
+            "Spokesperson Mao Ning addressed reporters.",
+            "Defense Ministry spokesperson Zhang Xiaogang commented.",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNotNone(S._EXPLICIT_CHINA_MENTION_RE.search(text))
+
+
+class TestDirectionSpecificPrefilter(unittest.TestCase):
+    """
+    _CHINA_DIRECTION_KEYWORDS / _US_DIRECTION_KEYWORDS — the actual
+    pre-filter classify_relevance() uses (added 2026-09-04, alongside the
+    shared/asymmetric _RELEVANCE_ALTERNATIVES split).
+
+    Fixes a real, latent bug found live WHILE doing that split: the old
+    single pre-filter (US_SOURCE_RELEVANCE_KEYWORDS) did not cover every
+    term in _EXPLICIT_CHINA_MENTION_RE/_EXPLICIT_US_MENTION_RE — "PRC",
+    "Ministry of Commerce", "Wang Yi", and "He Lifeng" (confirmed live,
+    all 4 failed the old pre-filter outright) — meaning an item whose
+    ONLY signal was one of those terms was silently rejected before the
+    explicit-mention auto-include tier ever got a chance to run. The new
+    pre-filters are built as the explicit-mention pattern OR'd with the
+    keyword alternatives, so they're a superset of the explicit check BY
+    CONSTRUCTION.
+    """
+
+    def test_previously_broken_china_side_terms_now_pass_prefilter(self):
+        for text in [
+            "The PRC issued a statement today.",
+            "The Ministry of Commerce released a list.",
+            "Wang Yi met with officials.",
+            "He Lifeng attended the summit.",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNotNone(S._CHINA_DIRECTION_KEYWORDS.search(text))
+
+    def test_previously_broken_us_side_terms_now_pass_prefilter(self):
+        for text in [
+            "D.C. officials met today.",
+            "The White House released a statement.",
+            "The State Department issued guidance.",
+            "The Department of Commerce announced tariffs.",
+            "The Department of the Treasury sanctioned firms.",
+            "The Department of Defense briefed reporters.",
+            "The Department of War released a report.",
+            "The National Security Council convened.",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNotNone(S._US_DIRECTION_KEYWORDS.search(text))
+
+    def test_prefilter_is_superset_of_explicit_mention_by_construction(self):
+        # Every _EXPLICIT_CHINA_MENTION_RE/_EXPLICIT_US_MENTION_RE hit
+        # must also pass its direction's pre-filter — this is the actual
+        # invariant the bug fix guarantees, checked generically rather
+        # than by re-listing terms, so it stays true even as the explicit
+        # lists grow further later.
+        china_terms = ("China", "Chinese", "Beijing", "PRC", "Xi Jinping", "Taiwan",
+                        "Hong Kong", "Huawei", "Ministry of Commerce", "Wang Yi", "He Lifeng",
+                        "Foreign Ministry", "State Council", "Li Qiang", "Guo Jiakun")
+        for term in china_terms:
+            with self.subTest(term=term):
+                self.assertIsNotNone(S._CHINA_DIRECTION_KEYWORDS.search(f"A report on {term} today."))
+
+        us_terms = ("U.S.", "United States", "Washington", "D.C.", "Trump", "Bessent",
+                    "White House", "State Department", "Department of Commerce",
+                    "National Security Council")
+        for term in us_terms:
+            with self.subTest(term=term):
+                self.assertIsNotNone(S._US_DIRECTION_KEYWORDS.search(f"A report on {term} today."))
+
+    def test_direction_specific_asymmetric_terms_only_hit_their_own_direction(self):
+        # "overcapacity" (US-describing-China) should feed the CHINA
+        # direction pre-filter; "coercion" (China-describing-US) should
+        # feed the US direction pre-filter — confirming the split
+        # actually routes each asymmetric term to the direction it
+        # measurably belongs to, not both.
+        self.assertIsNotNone(S._CHINA_DIRECTION_KEYWORDS.search("China has significant overcapacity."))
+        self.assertIsNotNone(S._US_DIRECTION_KEYWORDS.search("China accused the US of coercion."))
 
 
 class TestCleanTableLikeFragment(unittest.TestCase):
