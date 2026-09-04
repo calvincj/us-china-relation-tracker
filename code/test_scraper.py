@@ -1323,5 +1323,29 @@ class TestParseStateResultDate(unittest.TestCase):
         self.assertIsNone(S._parse_state_result_date(meta))
 
 
+class TestParseMofcomListDate(unittest.TestCase):
+    """
+    _parse_mofcom_list_date() — the list widget shows dates in two
+    different formats depending on which MOFCOM index it's rendering:
+    bracketed "[2026-09-03]" on the Chinese xwfb/* sections, bare
+    "08/04/2026" on the English press-conference index.
+    """
+
+    def test_bracketed_chinese_section_format(self):
+        self.assertEqual(S._parse_mofcom_list_date("[2026-09-03]"), S.date(2026, 9, 3))
+
+    def test_unbracketed_chinese_section_format(self):
+        self.assertEqual(S._parse_mofcom_list_date("2026-09-03"), S.date(2026, 9, 3))
+
+    def test_english_press_conference_format(self):
+        self.assertEqual(S._parse_mofcom_list_date("08/04/2026"), S.date(2026, 8, 4))
+
+    def test_none_input_returns_none(self):
+        self.assertIsNone(S._parse_mofcom_list_date(None))
+
+    def test_unparseable_text_returns_none(self):
+        self.assertIsNone(S._parse_mofcom_list_date("not a date"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
