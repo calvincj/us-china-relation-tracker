@@ -5176,3 +5176,69 @@ based source's empty-list handling (no explicit early-return needed —
 an empty `raw_links` already flows through to "0 new items" safely
 with no special-casing required, confirmed by tracing the code, not
 assumed).
+
+2026-09-04 continued — **real, serious bug caught live** by the
+validation run the user asked for ("wipe/test again if you deem
+necessary"). Ran a real full week (Aug 25-31) against the earlier
+fresh-test database snapshot with ALL of today's fixes in place, to
+measure the cumulative improvement — and the run itself surfaced a new
+bug mid-flight: `mofcom_lxxwfbh` started translating real content from
+**2023 and 2024** while targeting Aug 2026. Killed the run immediately
+(`$0.19` spent before catching it — not catastrophic, but real, wasted
+money) and root-caused it before doing anything else.
+
+Two compounding problems: (1) `_MOFCOM_LXXWFBH_DATE_RE` only matches
+the current URL slug shape (`swbzklxxwfbh2026n9y3r`) — older archive
+years use inconsistent shapes it doesn't match at all
+(`...2024n4y25` — no trailing "r"; `...2023n2y169r` — not a real
+month/day). (2) The fallback for an unparseable date was
+`_utcnow().date()` — TODAY — which is actively dangerous specifically
+for a date used in a newest-first sort with an early-stop: a genuinely
+years-old item with an unparseable date looked like the NEWEST
+possible item, sorted first, and the "stop once older than target
+start" check downstream never fired at all. This is also exactly why
+this section is uniquely exposed: its list widget has NO date `<span>`
+at all (confirmed live, unlike ldrhd/rcxwfb), so `_paginate_mofcom_
+cms_list`'s own coarse early-stop can never fire here either — the
+per-item URL-date check was the ONLY thing standing between a normal
+run and years of irrelevant archive content, and it had a live,
+demonstrated hole in it.
+
+Fixed with a second fallback before giving up: the title text
+consistently spells the real date out in Chinese regardless of year or
+URL quirks (`商务部召开例行新闻发布会（2024年4月25日）`) — added
+`_MOFCOM_LXXWFBH_TITLE_DATE_RE` to try that when the URL regex misses.
+And critically, changed the LAST-resort fallback (when neither URL nor
+title parses) from `_utcnow().date()` to `date.min` — the safe
+direction to be wrong in, since it sorts as the OLDEST possible item
+and gets correctly excluded/stopped-at instead of wrongly treated as
+current. Verified live against the exact real URLs that caused this:
+both previously-malformed ones now correctly resolve via the title
+fallback (2024-04-25, 2023-02-16), and a genuinely undated case
+correctly returns `date.min`, confirmed distinct from today's date.
+Re-ran the actual discovery (not the full expensive per-item pipeline)
+against the same real site state: correctly stopped at 2026-08-20 (one
+day before this run's Aug 25 target start) after 10 pages, narrowing
+to exactly 2 real, in-range items — down from dozens of years-old
+items previously reaching all the way to 2023. 4 new regression tests,
+covering the exact bug (asserting the fallback is NOT today's date,
+not just that it's SOME date). 160 tests total, all green.
+
+Systematically checked every OTHER `_utcnow()` date-fallback in the
+file (11 total) for the same compounding vulnerability (an active
+pagination/early-stop loop + a "looks newest" fallback) — none of the
+others have both conditions: most are backtest.py-only fallback paths
+never exercised by the live scrape_* call (treasury, ustr, scio all
+pass a real `known_date` computed during discovery in their live
+path), and the couple with no coarse pagination at all (mfa_leadership,
+mnd) only affect that one item's own date label, not a decision to
+keep fetching more content — a real but much narrower risk, not fixed
+today, not silently ignored either.
+
+Remaining known inefficiency, not a correctness bug: `mofcom_lxxwfbh`
+still fetches all 10 pages before its (now-correct) per-item filter
+narrows things down, since there's no coarse date signal available to
+stop pagination earlier for this specific section. Bounded by
+`_MOFCOM_PAGE_LIMIT`, costs nothing in LLM spend (list-page fetches
+only), just some extra, unnecessary network requests — a real
+trade-off, left as-is rather than over-engineered under time pressure.
