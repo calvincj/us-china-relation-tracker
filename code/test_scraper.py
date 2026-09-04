@@ -1251,5 +1251,43 @@ class TestIsolateItemErrors(unittest.TestCase):
         self.assertEqual(attempted, items)
 
 
+class TestAtomicDocSave(unittest.TestCase):
+    """
+    _atomic_doc_save() — added 2026-09-04 per user request ("save
+    progress along the way... so if crash then progress still saved").
+    A plain doc.save(path) writes straight to the target and can leave a
+    corrupted file if the process dies mid-write; this must never do that.
+    """
+
+    def test_success_leaves_no_temp_file_behind(self):
+        from docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "out.docx")
+            doc = Document()
+            doc.add_paragraph("hello")
+            S._atomic_doc_save(doc, path)
+            self.assertTrue(os.path.exists(path))
+            leftovers = [f for f in os.listdir(d) if f != "out.docx"]
+            self.assertEqual(leftovers, [])
+
+    def test_failure_leaves_original_untouched_and_no_temp_file(self):
+        from docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "out.docx")
+            Document().save(path)
+            original_bytes = open(path, "rb").read()
+
+            class ExplodingDoc:
+                def save(self, p):
+                    raise RuntimeError("simulated crash mid-save")
+
+            with self.assertRaises(RuntimeError):
+                S._atomic_doc_save(ExplodingDoc(), path)
+
+            self.assertEqual(open(path, "rb").read(), original_bytes)
+            leftovers = [f for f in os.listdir(d) if f != "out.docx"]
+            self.assertEqual(leftovers, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
