@@ -1478,5 +1478,47 @@ class TestConcurrentRunLock(unittest.TestCase):
         S._release_run_lock()  # should not raise even with no lock file
 
 
+class TestScrapeXGroupIsolation(unittest.TestCase):
+    """
+    scrape_x()'s two search groups (china/prc) — found while re-auditing
+    every source for gaps, 2026-09-04: only per-TWEET errors were
+    isolated; a failure in the "china" group's own search call (a
+    missing key, a real network exception — _x_search_recent's own
+    status-code check doesn't cover these) would abort the function
+    entirely, so "prc" never got attempted. Same failure shape as the
+    per-item bug fixed earlier the same day, one level up.
+    """
+
+    def test_second_group_still_runs_after_first_group_fails(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE seen_urls (url TEXT PRIMARY KEY, date_seen TEXT)")
+        conn.execute(
+            "CREATE TABLE entries (id INTEGER PRIMARY KEY, url TEXT, date TEXT, "
+            "kind TEXT, summary TEXT, anchor TEXT, exchanges_json TEXT, "
+            "paragraphs_json TEXT, source_label TEXT)"
+        )
+        conn.commit()
+
+        calls = []
+
+        def fake_search(query, since_id, max_results=100):
+            calls.append(query)
+            if len(calls) == 1:
+                raise RuntimeError("simulated failure on the first group")
+            return []
+
+        orig_search = S._x_search_recent
+        orig_load = S._load_x_state
+        S._x_search_recent = fake_search
+        S._load_x_state = lambda: {}
+        try:
+            S.scrape_x(None, conn, None)
+        finally:
+            S._x_search_recent = orig_search
+            S._load_x_state = orig_load
+
+        self.assertEqual(len(calls), 2, "the second group should still have been attempted")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
