@@ -5242,3 +5242,38 @@ stop pagination earlier for this specific section. Bounded by
 `_MOFCOM_PAGE_LIMIT`, costs nothing in LLM spend (list-page fetches
 only), just some extra, unnecessary network requests — a real
 trade-off, left as-is rather than over-engineered under time pressure.
+
+Re-ran the full validation (same Aug 25-31 week, same fresh-test
+starting point) after the mofcom_lxxwfbh fix — confirmed the stale
+lock from the killed first attempt was auto-detected and cleared, no
+2023/2024 content reappeared anywhere in the log this time, and cost
+came in normal (~$0.28, no runaway). Real, positive confirmation that
+today's pagination fixes work: `state` correctly paginated 4 pages and
+found 29 genuinely new items (was capped near-zero before);
+`whitehouse` paginated 3 pages and found 4 new items, one of which WAS
+the exact known-good oil-deal fact-sheet URL from the original ground
+truth — confirmed discovered and evaluated (marked seen with today's
+timestamp), where before today it was categorically unreachable.
+
+Final entry count for the week came back unchanged (5) despite this —
+checked why rather than assuming success or failure: every newly
+discovered candidate got a real `classify_relevance` call and a "NO"
+verdict this specific run, including the oil-deal fact sheet that WAS
+correctly included in the original hand-verified 16-entry ground
+truth. This is the same classifier-variance-on-borderline-content
+phenomenon already documented earlier this week (the FMPRC Kyrgyzstan/
+SCO case) — a discovery-layer success with a classification-layer
+coin-flip on an ambiguous case, not a new bug from today's changes.
+Not chased further tonight; classifier calibration on borderline
+content is a distinct, ongoing concern from "can this pipeline reach
+the content at all," which was today's actual scope.
+
+Merged the validation run's expanded `seen_urls` (55 newly-evaluated
+URLs, mostly correctly-rejected candidates) into the real database
+afterward via the same backup-then-merge pattern used earlier today,
+so future real runs benefit from today's wider discovery without
+re-spending on items already checked. Entries table untouched (still
+33, all real). Restored as the active `output/tracker.db`. Final test
+suite run: 160 tests, all green. Left the accumulated `.bak-*`/
+`.fresh-test-*` files in `output/` (gitignored, harmless) rather than
+deleting anything without being asked to.
