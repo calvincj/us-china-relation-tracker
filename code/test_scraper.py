@@ -1217,5 +1217,39 @@ class TestSourceLabelInReleaseBody(unittest.TestCase):
         )
 
 
+class TestIsolateItemErrors(unittest.TestCase):
+    """
+    _isolate_item_errors() — the shared per-item error boundary added
+    2026-09-04 (see NOTES.md) after finding source loops with no
+    isolation at all could let one item's exception abort every
+    remaining item in that source for the rest of the run.
+    """
+
+    def test_swallows_an_exception_and_logs_it(self):
+        with self.assertLogs(S.log, level="ERROR") as cm:
+            with S._isolate_item_errors("testsrc", "http://example.com/bad"):
+                raise RuntimeError("simulated failure")
+        self.assertIn("[testsrc] Error on http://example.com/bad", cm.output[0])
+        self.assertIn("simulated failure", cm.output[0])
+
+    def test_does_not_swallow_success_or_return_value(self):
+        ran = []
+        with S._isolate_item_errors("testsrc", "http://example.com/ok"):
+            ran.append("did work")
+        self.assertEqual(ran, ["did work"])
+
+    def test_a_loop_keeps_going_after_one_item_fails(self):
+        # The actual regression this exists to prevent: item #2 raising
+        # must not stop items #3/#4 from ever being attempted.
+        attempted = []
+        items = ["ok1", "bad", "ok2", "ok3"]
+        for item in items:
+            with S._isolate_item_errors("testsrc", item):
+                attempted.append(item)
+                if item == "bad":
+                    raise RuntimeError("simulated failure")
+        self.assertEqual(attempted, items)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
