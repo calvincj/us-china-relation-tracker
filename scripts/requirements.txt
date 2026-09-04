@@ -1,13 +1,29 @@
-httpx>=0.27.0
-beautifulsoup4>=4.12.0
-lxml>=5.2.0
-python-docx>=1.1.0
-google-genai>=1.0.0
-groq>=0.9.0
-python-dotenv>=1.0.0
-pydantic>=2.0.0
-pdfplumber>=0.11.0
-tqdm>=4.66.0
+# Pinned to exact versions, not "at least" (==, not >=) — added 2026-09-04.
+# This project already lived through one real "something changed
+# underneath us with no warning" incident (Google retired the Gemini
+# model this whole pipeline used to run on, see NOTES.md) — an
+# unbounded `>=` on any of these has the same failure shape: a
+# `pip install` run months from now could silently pull in a major new
+# version with breaking API changes, and the first sign of it would be
+# a confusing crash, not a clear "your dependency changed" message.
+# These are the exact versions this codebase has actually been built
+# and tested against.
+#
+# To intentionally upgrade one: bump the version here, run
+# `pip install -r scripts/requirements.txt`, then run the test suite
+# (`python code/test_scraper.py` and `python code/test_format_entry.py`)
+# and a real `--source <name>` run for anything that library touches
+# before trusting it — don't just bump the number and assume it's fine.
+httpx==0.28.1
+beautifulsoup4==4.15.0
+lxml==6.0.2
+python-docx==1.2.0
+google-genai==1.47.0
+groq==1.0.0
+python-dotenv==1.2.1
+pydantic==2.12.5
+pdfplumber==0.11.8
+tqdm==4.67.1
 # playwright was dropped 2026-08-04: the one source that used it (war.gov)
 # moved to its RSS backend, which isn't behind the same bot-check the
 # rendered page is. Re-add if a future source turns out to be JS-only with

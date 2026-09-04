@@ -29,6 +29,7 @@ Environment variables (put in .env or export directly):
 """
 
 import argparse
+import atexit
 import io
 import json
 import logging
@@ -620,6 +621,52 @@ def _estimate_usd(provider: str, prompt_tokens: int, completion_tokens: int, rea
     return (prompt_tokens or 0) / 1e6 * rates["input"] + output_tokens / 1e6 * rates["output"]
 
 
+class CostLimitExceeded(RuntimeError):
+    """
+    Raised by `_check_cost_limit()` once a single run's cumulative
+    estimated spend crosses MAX_RUN_USD. A dedicated exception type,
+    not a plain RuntimeError, on purpose: `_isolate_item_errors` and
+    main()'s own per-source `run()` wrapper both do a blanket
+    `except Exception: log and continue` — a circuit breaker using a
+    plain Exception would get silently swallowed by the very
+    error-isolation this session added earlier the same day, defeating
+    the entire point. Both of those call sites check for this type
+    specifically and re-raise it instead of absorbing it; only main()'s
+    top-level dispatch loop actually catches and handles it.
+    """
+
+
+# Real safety ceiling, not a normal-run tuning knob — a normal run costs
+# a few tens of cents (see NOTES.md's real logged numbers), so this is
+# roughly 15-20x that: generous enough that a legitimate heavy catch-up
+# run (e.g. --max-items 200) won't trip it, but a real runaway bug (an
+# infinite retry loop, a source suddenly returning thousands of items)
+# gets stopped well short of doing real financial damage instead of
+# running unbounded. Override with --max-cost for a deliberate large run.
+MAX_RUN_USD = 5.00
+_RUN_SPEND_USD = 0.0
+
+
+def _check_cost_limit() -> None:
+    """
+    Raise CostLimitExceeded if this run's cumulative estimated spend
+    (`_RUN_SPEND_USD`, updated by every `_log_usage()` call) has already
+    crossed `MAX_RUN_USD`. Called at exactly two points — the start of
+    `_isolate_item_errors` (before each item) and the start of main()'s
+    `run()` wrapper (before each source) — deliberately NOT from deep
+    inside the call stack (see CostLimitExceeded's docstring for why).
+    """
+    if _RUN_SPEND_USD > MAX_RUN_USD:
+        raise CostLimitExceeded(
+            f"This run's estimated spend (${_RUN_SPEND_USD:.2f}) crossed the "
+            f"${MAX_RUN_USD:.2f} safety limit — stopping here to avoid "
+            f"spending more than expected. Everything found before this "
+            f"point is still saved. If a run genuinely needs to cost more "
+            f"(e.g. a big --max-items catch-up), re-run with --max-cost to "
+            f"raise the limit."
+        )
+
+
 def _log_usage(
     provider: str,
     label: str,
@@ -643,7 +690,28 @@ def _log_usage(
     linked to Gemini, so cost can be tracked precisely across a whole
     session/day rather than re-parsing free-text log lines by hand each
     time. See summarize_usage_log() to aggregate it.
+
+    Also accumulates into `_RUN_SPEND_USD`, checked by `_isolate_item_
+    errors()` and main()'s per-source `run()` wrapper to enforce
+    MAX_RUN_USD — a real circuit breaker, added 2026-09-04 per user
+    request, against a genuine runaway (an infinite retry loop, a
+    source suddenly returning thousands of items) spending unbounded
+    real money with nothing to stop it. Deliberately does NOT raise
+    from here: this function sits underneath 25+ separate
+    `except Exception` blocks across every `process_*_item` function
+    and `call_llm`/`call_llm_json`'s own retry logic — raising from
+    this deep in the call stack would have to survive every single one
+    of those uncorrupted to actually stop anything, and missing even
+    one silently defeats the whole breaker (the exact "forgot to check
+    one of many call sites" mistake found and fixed earlier the same
+    day for per-item error isolation). Checking at exactly two
+    well-controlled points instead (before each item, before each
+    source) is coarser-grained — a source already past the limit still
+    finishes whatever single item is already in flight — but is
+    correct by construction rather than by hoping every intermediate
+    handler was updated.
     """
+    global _RUN_SPEND_USD
     total = total_tokens if total_tokens is not None else (prompt_tokens or 0) + (completion_tokens or 0)
     usd = _estimate_usd(provider, prompt_tokens or 0, completion_tokens or 0, reasoning_tokens or 0)
     reasoning_part = f" reasoning={reasoning_tokens}" if reasoning_tokens else ""
@@ -666,6 +734,9 @@ def _log_usage(
             }) + "\n")
     except Exception as exc:
         log.warning(f"Failed to append to {USAGE_LOG_PATH}: {exc}")
+
+    if usd is not None:
+        _RUN_SPEND_USD += usd
 
 
 def summarize_usage_log(path: str = USAGE_LOG_PATH) -> dict:
@@ -734,7 +805,17 @@ class _SourceErrorCapture(logging.Handler):
         self.messages: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.messages.append(record.getMessage())
+        # _describe_error_text(): appends a short plain-language "likely
+        # cause" to the raw message when one of a known set of patterns
+        # matches — added 2026-09-04 per user request, so the terminal
+        # summary says what actually happened (a rate limit, a dead
+        # page, a network blip, ...) instead of just the technical
+        # detail underneath it. Applied HERE, the single choke point
+        # every source's error summary already flows through, rather
+        # than at each of the 25+ individual `except Exception:
+        # log.error(...)` call sites this would otherwise need touching
+        # — same reasoning as _isolate_item_errors being centralized.
+        self.messages.append(_describe_error_text(record.getMessage()))
 
 
 def _summarize_run_usage(since_ts: str) -> tuple[int, int, float]:
@@ -3470,6 +3551,52 @@ def item_date(item: dict) -> datetime:
         return _utcnow()
 
 
+# Ordered (pattern, plain-language description) pairs — checked in
+# order, first match wins, against the LOWERCASED exception message.
+# Added 2026-09-04 per user request: the raw exception text shown today
+# ("Connection reset by peer", "429", a bare traceback repr) means
+# something specific to someone who's read this codebase, but nothing
+# at all to someone who hasn't — every source-error line in the
+# terminal should say what actually happened in plain words, not just
+# the technical detail underneath it.
+_ERROR_DESCRIPTIONS = (
+    (("429", "quota", "resource_exhausted"), "the AI service's rate limit or quota was hit"),
+    (("connection reset", "connectionreset"), "the website closed the connection unexpectedly"),
+    (("timeout", "timed out"), "the website took too long to respond"),
+    (("name or service not known", "nodename nor servname", "getaddrinfo failed"), "the website's address couldn't be found (may be down, or a DNS/network issue)"),
+    (("ssl", "certificate"), "there was a secure-connection (SSL/certificate) problem with the website"),
+    (("404",), "the page doesn't exist anymore (it may have been moved or removed)"),
+    (("403", "forbidden"), "the website blocked this request"),
+    (("500", "502", "503", "504"), "the website's own server had an error"),
+    (("expecting value", "json", "jsondecodeerror"), "the website sent back something unexpected instead of the data needed"),
+    (("does not exist", "not found") , "the AI model or resource requested isn't available"),
+)
+
+
+def _describe_error_text(text: str) -> str:
+    """
+    Return `text` with a short, plain-language explanation appended, if
+    one of `_ERROR_DESCRIPTIONS`'s patterns matches — shared by
+    `_describe_error()` (exception objects) and `_SourceErrorCapture`
+    (already-formatted log message strings, the single choke point for
+    every source's end-of-run error summary — see its own docstring).
+    Falls back to `text` unchanged if nothing matches; a wrong guess is
+    worse than no guess, so this only adds a description it's
+    reasonably confident about.
+    """
+    lowered = text.lower()
+    for patterns, description in _ERROR_DESCRIPTIONS:
+        if any(p in lowered for p in patterns):
+            return f"{text} (likely cause: {description})"
+    return text
+
+
+def _describe_error(exc: Exception) -> str:
+    """Exception-object counterpart to _describe_error_text() — see its
+    docstring."""
+    return _describe_error_text(str(exc))
+
+
 @contextmanager
 def _isolate_item_errors(tag: str, item_id: object):
     """
@@ -3491,10 +3618,13 @@ def _isolate_item_errors(tag: str, item_id: object):
     source using this gets the protection automatically instead of
     depending on whoever writes it remembering to.
     """
+    _check_cost_limit()
     try:
         yield
+    except CostLimitExceeded:
+        raise
     except Exception as exc:
-        log.error(f"[{tag}] Error on {item_id}: {exc}")
+        log.error(f"[{tag}] Error on {item_id}: {_describe_error(exc)}")
 
 
 # ── Source: FMPRC ─────────────────────────────────────────────────────────────
@@ -5420,6 +5550,99 @@ def _parse_user_date(s: str) -> date:
     return date.fromisoformat(s)
 
 
+_LOCK_PATH = os.path.join(DATA_DIR, ".tracker.lock")
+
+
+def _pid_is_running(pid: int) -> bool:
+    """
+    Portable "is this process still alive" check, for _acquire_run_lock()
+    below. Uses os.kill(pid, 0) on Mac/Linux (the standard trick — it
+    doesn't actually send a signal, just checks whether the kernel would
+    let you). Windows has no equivalent in the standard library, so this
+    shells out to `tasklist` there instead, rather than adding a new
+    dependency (psutil) just for this one check. If liveness genuinely
+    can't be determined either way, treats the PID as NOT running —
+    wrongly clearing a real lock (letting two runs overlap, a real but
+    rare risk this whole feature exists to prevent) is a smaller harm
+    than a false stale-lock report permanently blocking every future run
+    on a machine where this check happens to misbehave.
+    """
+    if sys.platform == "win32":
+        try:
+            output = subprocess.check_output(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                text=True, stderr=subprocess.DEVNULL,
+            )
+            return str(pid) in output
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just owned by someone else
+    except Exception:
+        return False
+
+
+def _acquire_run_lock() -> None:
+    """
+    Prevent two runs of this tool from executing at the same time —
+    added 2026-09-04 per user request. Real risk without this: a
+    brand-new item that neither overlapping run has marked "seen" yet
+    could be independently discovered and billed by BOTH runs, since an
+    item only gets marked seen after it finishes processing (see
+    flush_pending_entries()'s own docstring), not the instant it's
+    picked up. This can't happen from ordinary use of the double-click
+    launchers alone, but it's a real risk the moment more than one
+    scheduling mechanism is set up (cron AND launchd, say), or someone
+    manually starts a run while a scheduled one is already going.
+
+    Uses a plain PID file rather than a real OS-level lock (flock on
+    Mac, msvcrt.locking on Windows) for one reason: it needs to work
+    identically on both platforms this project ships launchers for,
+    without adding a dependency — and a PID file's one real weakness
+    (a stale file left behind by a crashed run, wrongly blocking every
+    future run forever) is directly handled by checking whether the
+    recorded PID is actually still alive before trusting the lock.
+    """
+    if os.path.exists(_LOCK_PATH):
+        old_pid = None
+        try:
+            with open(_LOCK_PATH) as f:
+                old_pid = int(f.read().strip())
+        except (ValueError, OSError):
+            pass
+        if old_pid is not None and _pid_is_running(old_pid):
+            print(f"Another run of this tool appears to already be in progress (PID {old_pid}).")
+            print(f"If you're sure that's not true — e.g. it crashed without cleaning up —")
+            print(f"delete this file and try again: {_LOCK_PATH}")
+            sys.exit(1)
+        else:
+            log.warning(f"Found a stale lock file (from PID {old_pid}, which isn't running "
+                        f"anymore) — clearing it and continuing.")
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(_LOCK_PATH, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(_release_run_lock)
+
+
+def _release_run_lock() -> None:
+    """Registered via atexit right after a successful _acquire_run_lock()
+    — runs on normal completion AND on an unhandled exception/sys.exit(),
+    so the lock doesn't outlive the process that holds it under any
+    ordinary exit path. Only a hard kill (kill -9, a power loss) skips
+    this — exactly the crash case _acquire_run_lock()'s stale-lock check
+    exists to recover from on the next run."""
+    try:
+        os.remove(_LOCK_PATH)
+    except OSError:
+        pass
+
+
 def run_setup_check() -> bool:
     """
     `--check`: a fast (one tiny real API call), effectively-free sanity
@@ -5536,7 +5759,7 @@ def _format_week_for_filename(start: date, end: date) -> str:
 
 
 def main() -> None:
-    global MAX_NEW_ITEMS_PER_RUN
+    global MAX_NEW_ITEMS_PER_RUN, MAX_RUN_USD, _RUN_SPEND_USD
     parser = argparse.ArgumentParser(description="US-China tracker scraper")
     parser.add_argument(
         "--source",
@@ -5580,6 +5803,14 @@ def main() -> None:
              "Doesn't scrape or write anything. Exits 0 if the check "
              "passes, 1 if it doesn't.",
     )
+    parser.add_argument(
+        "--max-cost", type=float, default=None,
+        help=f"Stop the run if its estimated spend crosses this many dollars "
+             f"(default: ${MAX_RUN_USD:.2f}). A safety net against a genuine "
+             f"runaway, not a normal-run tuning knob — a normal week costs a "
+             f"few tens of cents. Raise this only for a deliberate, known-"
+             f"expensive run (e.g. a large --max-items catch-up).",
+    )
     args = parser.parse_args()
     if args.check:
         sys.exit(0 if run_setup_check() else 1)
@@ -5587,6 +5818,10 @@ def main() -> None:
         _console_handler.setLevel(logging.INFO)
     if args.max_items is not None:
         MAX_NEW_ITEMS_PER_RUN = args.max_items
+    if args.max_cost is not None:
+        MAX_RUN_USD = args.max_cost
+    _RUN_SPEND_USD = 0.0  # reset in case main() is ever called more than once in one process
+    _acquire_run_lock()
 
     default_start, default_end = default_week_range()
     try:
@@ -5645,69 +5880,80 @@ def main() -> None:
     # this was the actual mechanism (not something more exotic) by
     # reproducing the exact garbled-bar shape from a real MOFCOM SSL
     # error live, 2026-09-03.
-    with logging_redirect_tqdm():
-        pbar = tqdm(total=len(sources_to_run), desc="Starting...", unit="source")
-        source_failures: dict[str, list[str]] = {}
+    source_failures: dict[str, list[str]] = {}
+    cost_limit_message: str | None = None
+    pbar = None
+    try:
+        with logging_redirect_tqdm():
+            pbar = tqdm(total=len(sources_to_run), desc="Starting...", unit="source")
 
-        def run(key: str, fn, *fn_args):
-            nonlocal total_new
-            if run_all or s == key:
-                pbar.set_description(SOURCES.get(key, key))
-                capture = _SourceErrorCapture()
-                log.addHandler(capture)
-                try:
-                    fn(*fn_args)
-                except Exception as exc:
-                    log.error(f"[{key}] Unhandled error: {exc}")
-                finally:
-                    log.removeHandler(capture)
-                if capture.messages:
-                    source_failures[key] = capture.messages
-                # Flush after each source rather than only once at the very end:
-                # bounds how much work is lost if the whole process gets killed
-                # mid-run, while still collapsing repeated date headings within
-                # (and, via the module-level "last date written", across)
-                # sources — see the PENDING_ENTRIES comment block above.
-                n = flush_pending_entries(doc, conn)
-                if n:
-                    log.info(f"[{key}] Wrote {n} entries to {DOC_PATH}")
-                    total_new += n
-                pbar.update(1)
+            def run(key: str, fn, *fn_args):
+                nonlocal total_new
+                if run_all or s == key:
+                    _check_cost_limit()  # before each SOURCE — see CostLimitExceeded's docstring
+                    pbar.set_description(SOURCES.get(key, key))
+                    capture = _SourceErrorCapture()
+                    log.addHandler(capture)
+                    try:
+                        fn(*fn_args)
+                    except CostLimitExceeded:
+                        raise
+                    except Exception as exc:
+                        log.error(f"[{key}] Unhandled error: {_describe_error(exc)}")
+                    finally:
+                        log.removeHandler(capture)
+                    if capture.messages:
+                        source_failures[key] = capture.messages
+                    # Flush after each source rather than only once at the very end:
+                    # bounds how much work is lost if the whole process gets killed
+                    # mid-run, while still collapsing repeated date headings within
+                    # (and, via the module-level "last date written", across)
+                    # sources — see the PENDING_ENTRIES comment block above.
+                    n = flush_pending_entries(doc, conn)
+                    if n:
+                        log.info(f"[{key}] Wrote {n} entries to {DOC_PATH}")
+                        total_new += n
+                    pbar.update(1)
 
-        run("fmprc_conf",    scrape_fmprc,
-            "https://www.fmprc.gov.cn/eng/xw/fyrbt/lxjzh/",
-            "press conference", model, conn, doc, client)
+            run("fmprc_conf",    scrape_fmprc,
+                "https://www.fmprc.gov.cn/eng/xw/fyrbt/lxjzh/",
+                "press conference", model, conn, doc, client)
 
-        run("fmprc_remarks", scrape_fmprc,
-            "https://www.fmprc.gov.cn/eng/xw/fyrbt/fyrbt/",
-            "spokesperson remarks", model, conn, doc, client)
+            run("fmprc_remarks", scrape_fmprc,
+                "https://www.fmprc.gov.cn/eng/xw/fyrbt/fyrbt/",
+                "spokesperson remarks", model, conn, doc, client)
 
-        run("mfa_leadership_speeches", scrape_mfa_leadership,
-            "https://www.mfa.gov.cn/web/ziliao_674904/zyjh_674906/",
-            "leadership speeches", model, conn, doc, client)
+            run("mfa_leadership_speeches", scrape_mfa_leadership,
+                "https://www.mfa.gov.cn/web/ziliao_674904/zyjh_674906/",
+                "leadership speeches", model, conn, doc, client)
 
-        run("mfa_leadership_activity", scrape_mfa_leadership,
-            "https://www.mfa.gov.cn/web/wjdt_674879/wjbxw_674885/",
-            "leadership activity", model, conn, doc, client)
+            run("mfa_leadership_activity", scrape_mfa_leadership,
+                "https://www.mfa.gov.cn/web/wjdt_674879/wjbxw_674885/",
+                "leadership activity", model, conn, doc, client)
 
-        run("mofcom",        scrape_mofcom,     model, conn, doc)
-        run("mofcom_daily",  scrape_mofcom_daily, model, conn, doc)
-        run("mofcom_leadership",      scrape_mofcom_leadership,      model, conn, doc)
-        run("mofcom_dept_leadership", scrape_mofcom_dept_leadership, model, conn, doc)
-        run("mofcom_bureau_heads",    scrape_mofcom_bureau_heads,    model, conn, doc)
-        run("mofcom_special_conf",    scrape_mofcom_special_conf,    model, conn, doc)
-        run("mofcom_lxxwfbh",         scrape_mofcom_lxxwfbh,         model, conn, doc)
-        run("scio",          scrape_scio,       model, conn, doc)
-        run("mnd",           scrape_mnd,        model, conn, doc)
-        run("state",         scrape_state,      model, conn, doc)
-        run("whitehouse",    scrape_whitehouse, model, conn, doc)
-        run("treasury",      scrape_treasury,   model, conn, doc)
-        run("ustr",          scrape_ustr,       model, conn, doc)
-        # "wardept" intentionally not run — see the SOURCES dict comment and
-        # scrape_wardept()'s own DISABLED note.
-        run("x",             scrape_x,          model, conn, doc)
+            run("mofcom",        scrape_mofcom,     model, conn, doc)
+            run("mofcom_daily",  scrape_mofcom_daily, model, conn, doc)
+            run("mofcom_leadership",      scrape_mofcom_leadership,      model, conn, doc)
+            run("mofcom_dept_leadership", scrape_mofcom_dept_leadership, model, conn, doc)
+            run("mofcom_bureau_heads",    scrape_mofcom_bureau_heads,    model, conn, doc)
+            run("mofcom_special_conf",    scrape_mofcom_special_conf,    model, conn, doc)
+            run("mofcom_lxxwfbh",         scrape_mofcom_lxxwfbh,         model, conn, doc)
+            run("scio",          scrape_scio,       model, conn, doc)
+            run("mnd",           scrape_mnd,        model, conn, doc)
+            run("state",         scrape_state,      model, conn, doc)
+            run("whitehouse",    scrape_whitehouse, model, conn, doc)
+            run("treasury",      scrape_treasury,   model, conn, doc)
+            run("ustr",          scrape_ustr,       model, conn, doc)
+            # "wardept" intentionally not run — see the SOURCES dict comment and
+            # scrape_wardept()'s own DISABLED note.
+            run("x",             scrape_x,          model, conn, doc)
 
-        pbar.close()
+            pbar.close()
+    except CostLimitExceeded as exc:
+        cost_limit_message = str(exc)
+        log.error(str(exc))
+        if pbar is not None:
+            pbar.close()
 
     # The actual per-week document — rendered fresh from the `entries`
     # table (see render_doc_for_range()'s docstring), not a copy of the
@@ -5730,6 +5976,10 @@ def main() -> None:
     if x_reads:
         usage_bits.append(f"{x_reads} X reads")
     usage_line = " + ".join(usage_bits)
+
+    if cost_limit_message:
+        print(f"\n⚠ STOPPED EARLY: {cost_limit_message}")
+        print("(Some sources below never got a chance to run this time.)")
 
     print(f"\nDone — {total_new} new entr{'y' if total_new == 1 else 'ies'} added for {week_label}.")
     print(f"Saved to: {dated_path}")
